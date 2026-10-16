@@ -1,0 +1,46 @@
+# Core AI and API dependencies
+anthropic>=0.34.0
+tavily-python>=0.3.3
+
+# Environment and configuration
+python-dotenv>=1.0.1
+
+# Rich console interface and UI
+rich>=13.7.1
+prompt-toolkit>=3.0.43
+
+# Audio processing and speech recognition
+SpeechRecognition>=3.10.1
+pydub>=0.25.1
+websockets>=12.0
+
+# Image processing
+Pillow>=10.2.0
+
+# Database and storage
+SQLAlchemy>=2.0.25
+
+# Interactive prompts and CLI
+inquirer>=3.2.4
+
+# Web scraping and research (Tavily dependency)
+requests>=2.31.0
+
+# Additional utilities commonly needed for Roku development
+lxml>=5.1.0
+xmltodict>=0.13.0
+
+# Optional audio backends for pydub
+# Uncomment if needed:
+# ffmpeg-python>=0.2.0
+# pyaudio>=0.2.13
+
+# Optional TTS integration
+# Uncomment if using text-to-speech:
+# elevenlabs>=0.2.26
+# gTTS>=2.5.1
+
+# Development and testing tools (optional)
+# pytest>=8.0.0
+# black>=24.0.0
+# flake8>=7.0.0
