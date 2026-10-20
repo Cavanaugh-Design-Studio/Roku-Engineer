@@ -1,0 +1,63 @@
+{
+  "name": "roku-engineer-workspace",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Roku Engineer: Yuki AI channel authoring with a complete Roku device studio, debugger, network inspector, automation, CLI and MCP.",
+  "homepage": "https://github.com/Cavanaugh-Design-Studio/Roku-Engineer#readme",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "start": "npx tsx apps/roku-engineer-studio/scripts/build/index.ts && npx tsx apps/roku-engineer-studio/scripts/run-electron.ts",
+    "start:solid": "npm run dev:solid -w roku-engineer-studio",
+    "postinstall": "npm run build:libs",
+    "build:libs": "npm run build -w roku-engineer-studio-platform && npm run build -w roku-engineer-studio-api && npm run build -w roku-engineer-studio-mcp",
+    "build": "npm --prefix apps/roku-engineer-studio run build",
+    "build:mac": "npm --prefix apps/roku-engineer-studio run build:mac",
+    "build:mac:intel": "npm --prefix apps/roku-engineer-studio run build:mac:intel",
+    "build:win": "npm --prefix apps/roku-engineer-studio run build:win",
+    "build:win:diagnostic": "npm --prefix apps/roku-engineer-studio run build:win:diagnostic",
+    "build:mac:diagnostic": "npm --prefix apps/roku-engineer-studio run build:mac:diagnostic",
+    "build:linux:diagnostic": "npm --prefix apps/roku-engineer-studio run build:linux:diagnostic",
+    "build:all:diagnostic": "npm --prefix apps/roku-engineer-studio run build:all:diagnostic",
+    "build:linux": "npm --prefix apps/roku-engineer-studio run build:linux",
+    "build:all": "npm --prefix apps/roku-engineer-studio run build:all",
+    "remote-server": "cd packages/roku-engineer-studio-remote-server && node roku-remote-server.js",
+    "deploy:remote-server": "node scripts/prepare-remote-server-deploy.mjs",
+    "ci:api": "node -e \"require('roku-engineer-studio-api'); console.log('roku-engineer-studio-api ok')\" && node packages/roku-engineer-studio-api/dist/cli.js --help",
+    "ci:remote-check": "npm run build -w roku-engineer-studio-remote-server && node --check packages/roku-engineer-studio-remote-server/roku-remote-server.js",
+    "ci:app-check": "npx tsx apps/roku-engineer-studio/scripts/build/index.ts && node --check apps/roku-engineer-studio/main.bundled.cjs && npm run verify:artifact-names -w roku-engineer-studio && npm run verify:auto-connect-store -w roku-engineer-studio && npm run verify:rce-account-prune -w roku-engineer-studio && npm run verify:doc-versions -w roku-engineer-studio && npm run verify:updater-errors -w roku-engineer-studio",
+    "typecheck:platform": "npm run typecheck -w roku-engineer-studio-platform",
+    "typecheck:api": "npm run typecheck -w roku-engineer-studio-api",
+    "typecheck:mcp": "npm run typecheck -w roku-engineer-studio-mcp",
+    "typecheck:network-inspector": "npm run typecheck -w roku-engineer-studio-network-inspector",
+    "typecheck:rce": "npm run typecheck -w roku-engineer-studio-rce",
+    "typecheck:electron": "npm run typecheck:electron -w roku-engineer-studio",
+    "typecheck:renderer": "npm run typecheck:renderer -w roku-engineer-studio",
+    "typecheck:remote-server": "npm run typecheck -w roku-engineer-studio-remote-server",
+    "typecheck": "npm run typecheck:platform && npm run typecheck:api && npm run typecheck:mcp && npm run typecheck:network-inspector && npm run typecheck:rce && npm run typecheck:electron && npm run typecheck:renderer && npm run typecheck:scripts -w roku-engineer-studio && npm run typecheck:remote-server && npm run renderer:solid:typecheck -w roku-engineer-studio",
+    "test": "npm test --workspaces --if-present",
+    "studio:build": "npm run build:desktop -w roku-engineer-studio",
+    "engine:test": "python -m unittest discover -s tests -p \"test_*.py\"",
+    "engine:cli": "python engineer_bridge.py",
+    "roku-engineer": "node packages/roku-engineer-studio-api/dist/cli.js",
+    "studio:smoke": "node scripts/verify-engineer-studio.mjs",
+    "test:engineer": "tsx --test tests/*.test.ts",
+    "verify": "npm run typecheck && npm test && npm run engine:test && npm run test:engineer && npm run studio:build && npm run ci:api && npm run ci:remote-check && npm run studio:smoke && npm run smoke:transports",
+    "smoke:transports": "node scripts/verify-transports.mjs",
+    "build:win:unpacked": "npm run studio:build && node scripts/package-windows.mjs",
+    "icons:generate": "python scripts/generate-brand-icons.py"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  },
+  "overrides": {
+    "dompurify": "^3.4.17",
+    "@electron/get": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=24.17.0"
+  }
+}

@@ -1,0 +1,63 @@
+// IPC handlers index - wires all IPC handler modules together
+
+import type { App, BrowserWindow, Clipboard, Dialog } from 'electron';
+import type { GetDeviceIdFn, GetDeviceInfoFn, SafeSendFn } from '../../shared/ipc/payloads';
+import { setupDeviceDiscovery } from './device-discovery';
+import { setupRokuCommands } from './roku-commands';
+import { setupRaleHandlers } from './rale-handlers';
+import { setupDevAppHandlers } from './dev-app-handlers';
+import { setupTelnetHandlers } from './telnet-handlers';
+import { setupRemoteHandlers } from './remote-handlers';
+import { setupSystemHandlers } from './system-handlers';
+import { setupNetworkInspectorHandlers } from './network-inspector-handlers';
+import { setupRelayHandlers } from './relay-handlers';
+import { setupDebuggerHandlers } from './debugger-handlers';
+import { setupRceHandlers } from './rce-handlers';
+import { setupRceVideoHandlers } from './rce-video-handlers';
+import { cleanupStaleTempFiles } from '../startup-temp-cleanup';
+
+type AppWindowState = {
+  developerModeEnabled: boolean;
+  privacyModeEnabled: boolean;
+  debugLoggingEnabled: boolean;
+  logFile: string | null;
+};
+
+/**
+ * ipcMain.handle() throws if the same channel is registered twice. `main.ts` calls
+ * setupIpcHandlers once in whenReady and again from `activate` if the main window was
+ * recreated; without this guard the second call crashes the main process.
+ */
+let ipcHandlersRegistered = false;
+
+function setupIpcHandlers(
+  mainWindow: BrowserWindow | undefined,
+  getDeviceInfo: GetDeviceInfoFn,
+  getDeviceId: GetDeviceIdFn,
+  safeSendToRenderer: SafeSendFn,
+  dialog: Dialog,
+  Menu: typeof import('electron').Menu,
+  clipboard: Clipboard,
+  app: App,
+  state: AppWindowState
+) {
+  if (ipcHandlersRegistered) return;
+  ipcHandlersRegistered = true;
+  // Wipe stale temp artifacts (screenshots, fiddle zips) left by a prior crashed run before any
+  // handler can write new ones. Guarded once via `ipcHandlersRegistered`.
+  cleanupStaleTempFiles();
+  setupDeviceDiscovery(mainWindow, getDeviceInfo, getDeviceId, safeSendToRenderer);
+  setupRokuCommands(mainWindow, getDeviceInfo);
+  setupRaleHandlers(mainWindow, safeSendToRenderer);
+  setupDevAppHandlers(mainWindow, dialog);
+  setupTelnetHandlers(mainWindow, safeSendToRenderer);
+  setupRemoteHandlers(mainWindow, safeSendToRenderer);
+  setupSystemHandlers(mainWindow, dialog, Menu, clipboard, app, state);
+  setupNetworkInspectorHandlers(mainWindow, safeSendToRenderer, dialog, app.getPath('userData'));
+  setupRelayHandlers(mainWindow, safeSendToRenderer, state);
+  setupDebuggerHandlers(mainWindow);
+  setupRceHandlers();
+  setupRceVideoHandlers();
+}
+
+export { setupIpcHandlers };

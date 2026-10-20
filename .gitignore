@@ -19,3 +19,77 @@ env/
 *.log
 .DS_Store
 Thumbs.db
+
+# Desktop workspace
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Generated from packages/roku-engineer-studio-mcp/src/tools.ts (npm run docs, or CI before Pages deploy)
+# â€” never hand-edit or commit; a stale committed copy would recreate the exact drift this exists to avoid.
+docs/mcp-tools.json
+
+
+# esbuild output (see apps/roku-engineer-studio/scripts/bundle-electron.js); rebuilt by prepare / start / build:bundle
+apps/roku-engineer-studio/preload-about.js
+apps/roku-engineer-studio/build-info.json
+apps/roku-engineer-studio/preload.bundled.cjs
+apps/roku-engineer-studio/main.bundled.cjs
+apps/roku-engineer-studio/fiddle-preload.bundled.cjs
+apps/roku-engineer-studio/log-viewer-preload.bundled.cjs
+apps/roku-engineer-studio/network-session-viewer-preload.bundled.cjs
+
+# worker_threads entries (see transpile-main-process.ts) â€” each needs its own standalone bundle,
+# same as the preloads above, rebuilt the same way.
+apps/roku-engineer-studio/network-session-parse.worker.js
+apps/roku-engineer-studio/leaf-cert.worker.js
+
+# Remote relay server: built from roku-remote-server.ts (see packages/roku-engineer-studio-remote-server/build.mjs)
+packages/roku-engineer-studio-remote-server/roku-remote-server.js
+# Same MITM leaf-cert worker_threads entry as the desktop app above, built separately for this process.
+packages/roku-engineer-studio-remote-server/leaf-cert.worker.js
+
+# Legacy renderer: all emitted ESM lives under renderer/dist/ (see build-legacy-renderer-modules.js)
+apps/roku-engineer-studio/renderer/dist/
+
+# Vendored ESM copy (see transpile-renderer.ts); keep `renderer/vendor/*.d.ts` in git
+apps/roku-engineer-studio/renderer/vendor/*.mjs
+
+# Solid + Vite renderer production build (see apps/roku-engineer-studio/vite.config.ts)
+apps/roku-engineer-studio/renderer-vite-dist/
+
+# System files
+.DS_Store
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Wiz security scan output (per-developer)
+.wiz/*
+
+# Local Claude Code config, skills, worktrees â€” kept out of the repo
+.claude/
+.discussion-docs/
+.cursor/
+CLAUDE.md
+apps/roku-engineer-studio/port-terminal-preload.bundled.cjs
+
+# Code-signing material â€” never commit
+*.p12
+*.p8
+
+apps/roku-engineer-studio/static-analysis-preload.bundled.cjs
+artifacts/
+audit-output.json
+apps/roku-engineer-studio/preload-settings.js

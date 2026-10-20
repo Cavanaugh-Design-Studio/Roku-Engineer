@@ -1,0 +1,261 @@
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as forge from 'node-forge';
+
+export type CaMaterial = {
+  certPem: string;
+  keyPem: string;
+  certDer: Buffer;
+  fingerprintSha256: string;
+  createdAt: string;
+  commonName: string;
+};
+
+const CA_CN = 'Roku Engineer Studio Network Inspector';
+const CA_ORG = 'Cavanaugh Design Studio';
+const CA_VALID_YEARS = 10;
+const CA_FILE_CERT = 'rds-network-inspector-ca.cert.pem';
+const CA_FILE_KEY = 'rds-network-inspector-ca.key.pem';
+const CA_FILE_PEM = 'rds-network-inspector-ca.pem';
+const CA_FILE_CRT = 'rds-network-inspector-ca.crt';
+
+let caDir: string | null = null;
+let cached: CaMaterial | null = null;
+
+export function initCaStore(userDataPath: string): void {
+  caDir = path.join(userDataPath, 'network-inspector', 'ca');
+  cached = null;
+}
+
+function ensureCaDir(): string {
+  if (!caDir) {
+    throw new Error('CA store not initialized — call initCaStore(userDataPath) first.');
+  }
+  if (!fs.existsSync(caDir)) {
+    // Owner-only (0700): the directory holds the CA private key, which must never be world-readable
+    // on a multi-user machine — anyone who can read it could forge certs for any host on the hotspot.
+    fs.mkdirSync(caDir, { recursive: true, mode: 0o700 });
+  }
+  return caDir;
+}
+
+function fingerprintSha256(certPem: string): string {
+  const der = forge.pem.decode(certPem)[0]?.body;
+  if (!der) return '';
+  const hash = crypto.createHash('sha256').update(Buffer.from(der, 'binary')).digest('hex');
+  return hash.match(/.{2}/g)?.join(':').toUpperCase() ?? hash;
+}
+
+function generateCa(): CaMaterial {
+  const keys = forge.pki.rsa.generateKeyPair(2048);
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+  cert.serialNumber = crypto.randomBytes(8).toString('hex');
+  const notBefore = new Date();
+  const notAfter = new Date();
+  notAfter.setFullYear(notBefore.getFullYear() + CA_VALID_YEARS);
+  cert.validity.notBefore = notBefore;
+  cert.validity.notAfter = notAfter;
+  const attrs = [
+    { name: 'commonName', value: CA_CN },
+    { name: 'organizationName', value: CA_ORG },
+    { shortName: 'OU', value: 'Roku Engineer Studio' }
+  ];
+  cert.setSubject(attrs);
+  cert.setIssuer(attrs);
+  cert.setExtensions([
+    { name: 'basicConstraints', cA: true, critical: true },
+    { name: 'keyUsage', keyCertSign: true, cRLSign: true, critical: true },
+    {
+      name: 'subjectKeyIdentifier',
+      subjectKeyIdentifier: true
+    }
+  ]);
+  cert.sign(keys.privateKey, forge.md.sha256.create());
+
+  const certPem = forge.pki.certificateToPem(cert);
+  const keyPem = forge.pki.privateKeyToPem(keys.privateKey);
+  const certDer = Buffer.from(forge.asn1.toDer(forge.pki.certificateToAsn1(cert)).getBytes(), 'binary');
+
+  return {
+    certPem,
+    keyPem,
+    certDer,
+    fingerprintSha256: fingerprintSha256(certPem),
+    createdAt: notBefore.toISOString(),
+    commonName: CA_CN
+  };
+}
+
+function persistCa(material: CaMaterial): void {
+  const dir = ensureCaDir();
+  fs.writeFileSync(path.join(dir, CA_FILE_CERT), material.certPem, 'utf8');
+  // The private key is the sensitive artifact: write it owner-read/write only (0600). `mode` only
+  // applies when the file is created, so chmod afterwards too in case a prior world-readable key
+  // already exists on disk (no-op on Windows, where POSIX modes don't apply).
+  const keyPath = path.join(dir, CA_FILE_KEY);
+  fs.writeFileSync(keyPath, material.keyPem, { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.chmodSync(keyPath, 0o600);
+  } catch {
+    /* best-effort — non-POSIX filesystems */
+  }
+  fs.writeFileSync(path.join(dir, CA_FILE_PEM), material.certPem, 'utf8');
+  fs.writeFileSync(path.join(dir, CA_FILE_CRT), material.certPem, 'utf8');
+  const meta = {
+    commonName: material.commonName,
+    fingerprintSha256: material.fingerprintSha256,
+    createdAt: material.createdAt
+  };
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');
+}
+
+function loadCaFromDisk(): CaMaterial | null {
+  const dir = ensureCaDir();
+  const certPath = path.join(dir, CA_FILE_CERT);
+  const keyPath = path.join(dir, CA_FILE_KEY);
+  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) return null;
+  const certPem = fs.readFileSync(certPath, 'utf8');
+  const keyPem = fs.readFileSync(keyPath, 'utf8');
+  const certDer = Buffer.from(forge.pem.decode(certPem)[0]?.body ?? '', 'binary');
+  let createdAt = new Date().toISOString();
+  const metaPath = path.join(dir, 'meta.json');
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as { createdAt?: string };
+      if (typeof meta.createdAt === 'string') createdAt = meta.createdAt;
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    certPem,
+    keyPem,
+    certDer,
+    fingerprintSha256: fingerprintSha256(certPem),
+    createdAt,
+    commonName: CA_CN
+  };
+}
+
+export function getOrCreateCa(): CaMaterial {
+  if (cached) return cached;
+  const existing = loadCaFromDisk();
+  if (existing) {
+    cached = existing;
+    return existing;
+  }
+  const created = generateCa();
+  persistCa(created);
+  cached = created;
+  return created;
+}
+
+export function getCaDir(): string {
+  return ensureCaDir();
+}
+
+export function getCaPemPath(): string {
+  return path.join(ensureCaDir(), CA_FILE_PEM);
+}
+
+export function getCaInfo(): {
+  commonName: string;
+  fingerprintSha256: string;
+  createdAt: string;
+  expiresAt: string;
+  pemPath: string;
+} {
+  const ca = getOrCreateCa();
+  // Read the expiry authoritatively from the cert's notAfter so it's correct on both the
+  // generate path and the load-from-disk path (meta.json only stores createdAt).
+  let expiresAt = '';
+  try {
+    expiresAt = forge.pki.certificateFromPem(ca.certPem).validity.notAfter.toISOString();
+  } catch {
+    /* ignore — a malformed cert leaves the range showing just the created date */
+  }
+  return {
+    commonName: ca.commonName,
+    fingerprintSha256: ca.fingerprintSha256,
+    createdAt: ca.createdAt,
+    expiresAt,
+    pemPath: getCaPemPath()
+  };
+}
+
+/**
+ * Generate an RSA keypair **without blocking the event loop**. node-forge's callback form drives the
+ * key generation as an incremental state machine that yields via `setImmediate` between steps, so the
+ * Electron main-process event loop keeps servicing IPC (device connect, discovery, UI) while the key
+ * is computed. The synchronous form froze the main thread for ~1s at proxy startup.
+ */
+function generateKeyPairAsync(bits: number): Promise<forge.pki.rsa.KeyPair> {
+  return new Promise((resolve, reject) => {
+    forge.pki.rsa.generateKeyPair({ bits }, (err, keypair) => {
+      if (err) reject(err);
+      else resolve(keypair);
+    });
+  });
+}
+
+// A single RSA keypair shared by every per-host leaf cert. Generating a fresh 2048-bit keypair per
+// hostname was a ~50-200ms synchronous stall on the TLS handshake hot path (every new SNI name).
+// A MITM leaf does not need a unique key — only a unique certificate (subject/SAN, CA-signed) — so
+// one keypair is generated once and reused, turning each leaf into just a sign() call.
+let sharedLeafKeys: forge.pki.rsa.KeyPair | null = null;
+let leafKeyPromise: Promise<forge.pki.rsa.KeyPair> | null = null;
+
+function getSharedLeafKeys(): forge.pki.rsa.KeyPair {
+  if (!sharedLeafKeys) {
+    // Fallback: a TLS handshake arrived before warmLeafKeyPair() finished (rare — the proxy warms at
+    // start, well before a client is configured). Generate synchronously this once so the handshake
+    // isn't dropped; subsequent leaves reuse it.
+    sharedLeafKeys = forge.pki.rsa.generateKeyPair(2048);
+  }
+  return sharedLeafKeys;
+}
+
+/**
+ * Pre-generate the shared leaf keypair off the request hot path, **asynchronously** so proxy startup
+ * never blocks the event loop. The proxy fires this (fire-and-forget) at start, so the one
+ * unavoidable keygen is ready before the first HTTPS handshake without stalling startup or connect.
+ */
+export async function warmLeafKeyPair(): Promise<void> {
+  if (sharedLeafKeys) return;
+  if (!leafKeyPromise) leafKeyPromise = generateKeyPairAsync(2048);
+  try {
+    sharedLeafKeys = await leafKeyPromise;
+  } catch {
+    // Let a later warm (or the sync fallback in getSharedLeafKeys) retry.
+    leafKeyPromise = null;
+  }
+}
+
+export function createLeafCert(hostname: string, ca: CaMaterial): { certPem: string; keyPem: string } {
+  const caCert = forge.pki.certificateFromPem(ca.certPem);
+  const caKey = forge.pki.privateKeyFromPem(ca.keyPem);
+  const keys = getSharedLeafKeys();
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+  cert.serialNumber = crypto.randomBytes(8).toString('hex');
+  const notBefore = new Date();
+  const notAfter = new Date();
+  notAfter.setFullYear(notBefore.getFullYear() + 1);
+  cert.validity.notBefore = notBefore;
+  cert.validity.notAfter = notAfter;
+  cert.setSubject([{ name: 'commonName', value: hostname }]);
+  cert.setIssuer(caCert.subject.attributes);
+  cert.setExtensions([
+    { name: 'basicConstraints', cA: false },
+    { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
+    { name: 'extKeyUsage', serverAuth: true },
+    { name: 'subjectAltName', altNames: [{ type: 2, value: hostname }] }
+  ]);
+  cert.sign(caKey, forge.md.sha256.create());
+  return {
+    certPem: forge.pki.certificateToPem(cert),
+    keyPem: forge.pki.privateKeyToPem(keys.privateKey)
+  };
+}

@@ -1,0 +1,52 @@
+{
+  "name": "roku-engineer-studio-network-inspector",
+  "version": "1.1.0",
+  "description": "Roku Engineer Studio Network Inspector engine \u2014 hotspot packet capture (DNS/SNI/HTTP) + local MITM proxy, transport-agnostic so it runs in the desktop app and the remote server.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cavanaugh-Design-Studio/Roku-Engineer.git",
+    "directory": "packages/roku-engineer-studio-network-inspector"
+  },
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "keywords": [
+    "roku",
+    "network",
+    "packet-capture",
+    "mitm",
+    "tcpdump"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "node-forge": "^1.4.0",
+    "roku-engineer-studio-api": "^1.0.0",
+    "roku-engineer-studio-platform": "^1.0.0"
+  },
+  "optionalDependencies": {
+    "cap": "^0.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "@types/node-forge": "1.3.14",
+    "typescript": "5.9.3"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./types": "./types.ts",
+    "./rewrite": "./rewrite.ts",
+    "./content-search": "./content-search.ts",
+    "./prerequisites": "./prerequisites.ts",
+    "./setup-guide": "./setup-guide.ts",
+    "./packet-parser": "./packet-parser.ts",
+    "./http-stream-parser": "./http-stream-parser.ts",
+    "./input-sanitize": "./input-sanitize.ts",
+    "./body-text": "./body-text.ts"
+  }
+}

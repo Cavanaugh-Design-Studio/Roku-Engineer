@@ -1,0 +1,331 @@
+import type { IncomingMessage } from 'http';
+
+const { createHash, randomBytes } = require('crypto');
+const { request } = require('http');
+const { errorMessage } = require('roku-engineer-studio-platform');
+
+const DEV_USERNAME = 'rokudev';
+const DEFAULT_TIMEOUT_MS = 15000;
+
+type MultipartField = { name: string; value: string };
+type MultipartFile = { name: string; filename: string; data: Buffer; contentType?: string };
+
+/** Parse `WWW-Authenticate: Digest key="val", ...` challenge parameters. */
+function parseDigestChallenge(header: string): Record<string, string> {
+  const params: Record<string, string> = {};
+  const body = header.replace(/^Digest\s+/i, '').trim();
+  const re = /(\w+)=("([^"]*)"|([^,\s]+))/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(body))) {
+    params[match[1]!] = match[3] ?? match[4] ?? '';
+  }
+  return params;
+}
+
+function pickQop(challenge: Record<string, string>): string | undefined {
+  const raw = challenge.qop;
+  if (!raw) return undefined;
+  const options = raw.split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
+  if (options.includes('auth')) return 'auth';
+  // We only implement `qop=auth`. Returning an unsupported value like `auth-int`
+  // here would build a response digest WITHOUT the required entity-body hash — a
+  // definitely-wrong header that fails as "authentication failed" even with the
+  // correct password. Fall back to legacy (no-qop, RFC 2069) digest instead.
+  return undefined;
+}
+
+/** Strip CR/LF and quotes from a value interpolated into a multipart header param so a
+ *  crafted field name / filename can't break framing or inject extra headers. */
+function sanitizeHeaderParam(value: string): string {
+  return String(value).replace(/[\r\n"]/g, '').slice(0, 256);
+}
+
+function md5Hex(value: string): string {
+  return createHash('md5').update(value).digest('hex');
+}
+
+function buildDigestAuthorizationHeader(options: {
+  username: string;
+  password: string;
+  method: string;
+  uri: string;
+  challenge: Record<string, string>;
+  cnonce?: string;
+}): string {
+  const { username, password, method, uri, challenge, cnonce: cnonceIn } = options;
+  const realm = challenge.realm ?? '';
+  const nonce = challenge.nonce ?? '';
+  const opaque = challenge.opaque;
+  const qop = pickQop(challenge);
+
+  const ha1 = md5Hex(`${username}:${realm}:${password}`);
+  const ha2 = md5Hex(`${method}:${uri}`);
+
+  const parts = [
+    `username="${username}"`,
+    `realm="${realm}"`,
+    `nonce="${nonce}"`,
+    `uri="${uri}"`
+  ];
+
+  if (qop) {
+    const nc = '00000001';
+    const cnonce = cnonceIn ?? randomBytes(8).toString('hex');
+    const response = md5Hex(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`);
+    parts.push(`response="${response}"`, `qop=${qop}`, `nc=${nc}`, `cnonce="${cnonce}"`);
+  } else {
+    const response = md5Hex(`${ha1}:${nonce}:${ha2}`);
+    parts.push(`response="${response}"`);
+  }
+
+  if (opaque) {
+    parts.push(`opaque="${opaque}"`);
+  }
+
+  return `Digest ${parts.join(', ')}`;
+}
+
+function buildMultipartBody(
+  fields: MultipartField[],
+  files: MultipartFile[] = []
+): { body: Buffer; contentType: string } {
+  const boundary = `----RokuDevStudio${randomBytes(12).toString('hex')}`;
+  const chunks: Buffer[] = [];
+  const crlf = '\r\n';
+
+  for (const field of fields) {
+    chunks.push(Buffer.from(`--${boundary}${crlf}`));
+    chunks.push(Buffer.from(`Content-Disposition: form-data; name="${sanitizeHeaderParam(field.name)}"${crlf}${crlf}`));
+    chunks.push(Buffer.from(field.value));
+    chunks.push(Buffer.from(crlf));
+  }
+
+  for (const file of files) {
+    const ct = sanitizeHeaderParam(file.contentType ?? 'application/octet-stream');
+    chunks.push(Buffer.from(`--${boundary}${crlf}`));
+    chunks.push(
+      Buffer.from(
+        `Content-Disposition: form-data; name="${sanitizeHeaderParam(file.name)}"; filename="${sanitizeHeaderParam(file.filename)}"${crlf}Content-Type: ${ct}${crlf}${crlf}`
+      )
+    );
+    chunks.push(file.data);
+    chunks.push(Buffer.from(crlf));
+  }
+
+  chunks.push(Buffer.from(`--${boundary}--${crlf}`));
+  return {
+    body: Buffer.concat(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`
+  };
+}
+
+function drainResponse(res: IncomingMessage): Promise<void> {
+  return new Promise((resolve, reject) => {
+    res.on('data', () => {});
+    res.on('end', resolve);
+    res.on('error', reject);
+    res.resume();
+  });
+}
+
+function readResponseBody(res: IncomingMessage, maxBytes = 12 * 1024 * 1024): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const parts: Buffer[] = [];
+    let total = 0;
+    res.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        res.destroy();
+        reject(new Error('Response body too large'));
+        return;
+      }
+      parts.push(chunk);
+    });
+    res.on('end', () => resolve(Buffer.concat(parts)));
+    res.on('error', reject);
+  });
+}
+
+/** Pick the Digest challenge when the device sends Basic + Digest (common on Roku). */
+function findDigestChallengeHeader(
+  wwwAuthenticate: string | string[] | undefined
+): string | undefined {
+  if (!wwwAuthenticate) return undefined;
+  const list = Array.isArray(wwwAuthenticate) ? wwwAuthenticate : [wwwAuthenticate];
+  for (const entry of list) {
+    const trimmed = String(entry).trim();
+    const digestIdx = trimmed.search(/\bDigest\s+/i);
+    if (digestIdx >= 0) {
+      return trimmed.slice(digestIdx);
+    }
+  }
+  return undefined;
+}
+
+interface HttpDigestRequestOptions {
+  ip: string;
+  password: string;
+  path: string;
+  method: 'GET' | 'POST';
+  body?: Buffer;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+}
+
+function httpDigestRequestOnce(options: HttpDigestRequestOptions): Promise<{ statusCode: number; body: Buffer }> {
+  const { ip, password, path, method, body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+
+  return new Promise((resolve, reject) => {
+    // A single HTTP round. The body is streamed ONLY on `withBody` rounds, which
+    // only ever run once we hold credentials (or the device confirmed no auth is
+    // required). This avoids writing a large POST body to a socket the device
+    // closes with a 401 challenge — which surfaces as `write EPIPE` and aborts a
+    // sideload mid-upload.
+    const round = (authorization: string | undefined, withBody: boolean, roundMethod: string) => {
+      const reqHeaders: Record<string, string> = {
+        Host: ip,
+        Connection: 'close',
+        ...headers
+      };
+      if (withBody && body) {
+        reqHeaders['Content-Length'] = String(body.length);
+      } else {
+        // Bodyless probe: drop the multipart content-type/length so the device
+        // doesn't sit waiting for a body that never comes.
+        delete reqHeaders['Content-Type'];
+        delete reqHeaders['content-type'];
+        delete reqHeaders['Content-Length'];
+      }
+      if (authorization) {
+        reqHeaders.Authorization = authorization;
+      }
+
+      const req = request(
+        {
+          host: ip,
+          port: 80,
+          path,
+          method: roundMethod,
+          headers: reqHeaders,
+          // Fresh socket per round — Roku often RSTs keep-alive sockets after 401.
+          agent: false,
+          family: 4
+        },
+        (res: IncomingMessage) => {
+          const status = res.statusCode ?? 0;
+
+          // Got the digest challenge — authenticate, then send the real request.
+          if (status === 401 && !authorization) {
+            const challengeHeader = findDigestChallengeHeader(res.headers['www-authenticate']);
+            void drainResponse(res)
+              .then(() => {
+                if (!challengeHeader) {
+                  reject(new Error('Device did not offer HTTP Digest authentication.'));
+                  return;
+                }
+                const challenge = parseDigestChallenge(challengeHeader);
+                const authHeader = buildDigestAuthorizationHeader({
+                  username: DEV_USERNAME,
+                  password,
+                  method,
+                  uri: path,
+                  challenge
+                });
+                round(authHeader, Boolean(body), method);
+              })
+              .catch(reject);
+            return;
+          }
+
+          // The bodyless probe came back without a challenge (no auth required).
+          // Re-issue the real request (with body) unauthenticated.
+          if (roundMethod !== method && status !== 401) {
+            void drainResponse(res)
+              .then(() => round(undefined, Boolean(body), method))
+              .catch(reject);
+            return;
+          }
+
+          void readResponseBody(res)
+            .then((responseBody) => {
+              resolve({ statusCode: status, body: responseBody });
+            })
+            .catch(reject);
+        }
+      );
+
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error('Connection timed out'));
+      });
+      req.on('error', reject);
+      if (withBody && body) req.write(body);
+      req.end();
+    };
+
+    // When there's a body, fetch the digest challenge with a bodyless GET probe
+    // first so the body is only streamed on the authenticated round. Bodyless
+    // requests keep the original single-round behavior.
+    if (body) {
+      round(undefined, false, 'GET');
+    } else {
+      round(undefined, false, method);
+    }
+  });
+}
+
+async function httpDigestRequest(options: HttpDigestRequestOptions): Promise<{ statusCode: number; body: Buffer }> {
+  try {
+    return await httpDigestRequestOnce(options);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    const msg = errorMessage(err);
+    const retriable =
+      code === 'ECONNRESET' ||
+      code === 'EPIPE' ||
+      /socket hang up|ECONNRESET|EPIPE/i.test(msg);
+    if (!retriable) throw err;
+    return httpDigestRequestOnce(options);
+  }
+}
+
+function mapDeviceHttpError(err: unknown, context = 'Device request'): { success: false; error: string } {
+  const msg = errorMessage(err);
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (
+    code === 'ECONNREFUSED' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ENOTFOUND' ||
+    code === 'EHOSTUNREACH' ||
+    code === 'ENETUNREACH' ||
+    /connection refused|failed to connect|couldn't connect|could not resolve host|timed out|socket hang up|EPIPE/i.test(msg)
+  ) {
+    return {
+      success: false,
+      error: 'Could not reach the device web server. Check the IP and network, then try again.'
+    };
+  }
+  return { success: false, error: `${context} failed: ${msg}` };
+}
+
+function responseLooksLikeAuthFailure(statusCode: number, text: string): boolean {
+  // A genuine auth failure is an HTTP 401. The text heuristic is only a backstop
+  // for devices that return 200 with an auth-failure body, so it must match
+  // actual failure phrasing — NOT the bare word "authentication", which also
+  // appears on the normal (successful) plugin_install page and would otherwise
+  // mask a successful sideload as an auth error.
+  if (statusCode === 401) return true;
+  return /401\s*unauthorized|authentication\s+(?:failed|required|error)|failed to authenticate|invalid (?:dev(?:eloper)?\s+)?password/i.test(text);
+}
+
+module.exports = {
+  DEV_USERNAME,
+  DEFAULT_TIMEOUT_MS,
+  parseDigestChallenge,
+  findDigestChallengeHeader,
+  buildDigestAuthorizationHeader,
+  buildMultipartBody,
+  httpDigestRequest,
+  mapDeviceHttpError,
+  responseLooksLikeAuthFailure
+};

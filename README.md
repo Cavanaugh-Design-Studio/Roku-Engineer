@@ -1,388 +1,135 @@
-# 🚀 Roku Engineer — AI-Powered Roku Channel Builder
+# Roku Engineer
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Claude Sonnet 4.6](https://img.shields.io/badge/AI-Claude%20Sonnet%205.5-orange.svg)](https://www.anthropic.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Roku OS 14/15/16](https://img.shields.io/badge/Roku%20OS-14%2F15%2F16-purple.svg)](https://developer.roku.com/)
-[![SGDEX](https://img.shields.io/badge/SGDEX-Supported-green.svg)](https://developer.roku.com/docs/developer-program/libraries/sgdex/sgdex-guide.md)
+**Build the next thing on TV.**
 
-> **Yuki** — Your AI-powered Roku development companion. Built with Claude Sonnet 5.5 and tuned for modern Roku OS 14/15/16, SGDEX, and certification-ready channel production.
+AI-assisted channel authoring and a complete Roku device lab in one desktop workspace. Create and edit BrightScript / SceneGraph projects, review Yuki’s proposed changes, inspect running channels, automate tests, and build sideloadable ZIPs.
 
----
+![Engineer Workspace](docs/images/engineer-overview.png)
 
-## 🌟 Overview
+## The whole workflow
 
-Roku Engineer transforms the Roku channel development experience. Instead of navigating boilerplate, certification docs, and architecture patterns manually, you describe what you want — Yuki builds it.
+| Build | Inspect | Automate |
+| --- | --- | --- |
+| SceneGraph, content-grid, and SGDEX starters | Local discovery and device connections | Action Scripts with variables and branches |
+| Project browser, editor, command palette | Remote, app management, device queries | Builder, pause/resume/stop, run artifacts |
+| Seven integration generators and file previews | Telnet, socket debugger, RALE / App Connector | Headless `roku-engineer` CLI |
+| Yuki assistant with scoped project tools | Network inspector, traffic rules, HAR / PCAP | MCP tools for AI hosts |
+| Validation, reports, channel packaging | CPU / memory charts and screenshots | Remote labs and cloud-emulator connections |
 
-From a basic SceneGraph app to a full **SVOD/AVOD channel** with deep linking, content feed integration, and pre-roll ads, Roku Engineer handles the heavy lifting — and can talk to your Roku device directly to pull logs, screenshots, and performance stats.
+### Engineer Workspace
 
----
+- **Create or open a channel.** Starters include a manifest, launch loop, memory-monitor and deep-link helpers, plus generated artwork. SGDEX projects require the official SGDEX components before deployment.
+- **Edit with confidence.** Filter source files, jump with `Ctrl/Cmd+K`, and save with `Ctrl/Cmd+S`. Saves detect external changes and retain prior contents in `.engineer/history/`.
+- **Preview integrations.** Generate memory monitoring, deep linking, content feeds, RAF advertising, Roku Pay, WebSockets, and server-sent events. Review before/after files before applying changes.
+- **Work with Yuki.** Explore code, investigate issues, and prepare file-change proposals. Yuki can read source, run local checks, and preview generators; edits wait for your review.
+- **Check and package.** Export local validation reports and build ZIPs under `.engineer/artifacts/`. Environment files, hidden folders, caches, private-key formats, and symlinks are excluded.
 
-## ✨ What's New in v2.1
+### Device Lab
 
-| Feature | Description |
-|---|---|
-| 🧠 **roAppMemoryMonitor Integration** | Mandatory for certification as of **Oct 1, 2026** — new projects and the `generate_memory_monitor` tool wire up OS 15.2+ low-memory threshold alerts (80/85/90/95%) with a `roDeviceInfo` fallback |
-| 🔌 **WebSockets (OS 16.0)** | `generate_websocket_handler` scaffolds an `roWebSocket` Task for bi-directional server communication |
-| 📡 **Server-Sent Events (OS 16.0)** | `generate_sse_handler` scaffolds a Task consuming `roUrlTransfer.AsyncGetSSEvents()` / `roSSEvent` streams |
-| 🎨 **SceneGraph Effect Node (OS 16.0)** | GPU-accelerated rounded corners, borders, and gradients on Poster/Rectangle nodes via the new `Effect` component template |
-| 💳 **Roku Pay Integration** | `generate_roku_pay_integration` generates ChannelStore entitlement checks, catalog browsing, purchase flows, and the OS 16.0 `GetRokuCustomerId` command |
-| 📺 **Device Interaction** | ECP device-info queries, `chanperf` performance stats (with OS 15.2+ `<proc-stat>` raw Linux CPU stats), debug console log capture (telnet 8085), and developer-mode screenshots |
-| 🗂️ **Content Feed Validation** | `validate_content_feed` checks Direct Publisher JSON feeds against the published schema (HTTPS URLs, `videoType` values, ISO 8601 dates) |
-| 🛡️ **Updated Static Analysis** | Project validation now detects the in-app ECP prohibition (automatic publishing blocker) and missing memory-monitor integrations |
-| 🏗️ **SGDEX Project Type** | Scaffold complete `GridView`, `DetailsView`, `MediaView` channels out of the box |
-| 🔗 **Deep Link Handler** | Auto-generate certification-required `contentId` / `mediaType` routing (launch args **and** runtime `roInput` events) |
-| 📡 **Content Feed Handler** | HTTP Task nodes that parse JSON or MRSS into `ContentNode` trees |
-| 📢 **RAF Integration** | Scaffolds Roku Advertising Framework tasks for pre/mid/post-roll ads |
-| 📂 **Manifest Support** | Full `manifest` file creation — no longer blocked by extension filters |
-| 🧱 **Module-Level Templates** | All SceneGraph & BrightScript templates are now accessible from any tool |
+Switch from **Engineer Workspace** to **Device Lab** in the title bar:
 
----
+- SSDP / subnet discovery, manual and multiple-device connections, remote locations, and Roku Cloud Emulator accounts.
+- D-pad / media / keyboard control, floating remote, app launch / management, deep links, screenshots, and performance charts.
+- Encrypted developer-password storage, sideloading, and multi-device sideload relay.
+- Searchable telnet console, saved-log viewer, port terminals, socket debugger, breakpoints, stepping, threads, variables, and watches.
+- RALE / App Connector calls, SceneGraph node updates, registry tools, and TrackerTask integration / export.
+- Network proxy, optional packet capture, request / response search, mock / block / throttle rules, and saved-session viewers.
+- Action Script builder / executor / library, variables and conditions, test artifacts, and PDF exports.
+- Monaco BrightScript Fiddle and Roku’s official static-analysis launcher.
 
-## 🛠️ Installation
+The device lab supports six interface languages. Engineer Workspace currently uses English.
 
-### Prerequisites
+## A closer look
 
-- Python 3.8+
-- Windows, macOS, or Linux
-- Internet connection for AI and search features
+### A workspace for the channel you are building
 
-### Quick Setup
+| Project editor | Integration library |
+| --- | --- |
+| ![BrightScript project editor with file navigation and Yuki](docs/images/engineer-editor.png) | ![Seven channel integrations with reviewable previews](docs/images/engineer-integrations.png) |
+| Browse your source, keep your changes safe, and work with Yuki in context. | Add platform features with purpose-built generators. |
 
-1. **Clone the Repository**
+### Review every change before it reaches your project
 
-   ```bash
-   git clone <repository-url>
-   cd Roku-Engineer
-   ```
+![Before-and-after file review in Roku Engineer](docs/images/engineer-review.png)
 
-2. **Install Dependencies**
+| Channel readiness | A comfortable fit for smaller windows |
+| --- | --- |
+| ![Local validation findings and channel packaging](docs/images/engineer-readiness.png) | ![Compact project editor with an adaptive layout](docs/images/engineer-compact.png) |
+| See the findings, export a report, and build your channel ZIP. | The editor adapts, and Yuki becomes a drawer you can open when needed. |
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+These screenshots come from the running desktop application. Resize the window, collapse Yuki for more editor space, or reopen the assistant with the **Yuki** button. Use the top-right maximize / restore button to fill the desktop; on Windows and Linux, press **F11** for fullscreen and press it again to return.
 
-3. **Configure Environment**
+## Run from source
 
-   Copy `example.env` to `.env` and fill in your keys:
+Requirements: **Node.js 24.17+**, npm, and **Python 3.10+**. Python 3.13 on Windows is included in local verification. Hardware workflows require a Roku device; project tools work without one.
 
-   ```env
-   # Required
-   ANTHROPIC_API_KEY=your_claude_api_key_here
-   TAVILY_API_KEY=your_tavily_api_key_here
-
-   # Optional: Text-to-Speech (ElevenLabs)
-   ELEVEN_LABS_API_KEY=your_elevenlabs_api_key_here
-   VOICE_ID=your_preferred_voice_id
-   MODEL_ID=eleven_monolingual_v1
-
-   # AI Model Overrides (Optional)
-   MAINMODEL=claude-sonnet-5-5
-   TOOLCHECKERMODEL=claude-sonnet-5-5
-   CODEEDITORMODEL=claude-sonnet-5-5
-   CODEEXECUTIONMODEL=claude-sonnet-5-5
-   ```
-
-4. **Launch**
-
-   ```bash
-   python roku_engineer.py
-   ```
-
----
-
-## 🚀 Quick Start
-
-### Create Your First Channel
-
-```
-You: Create a new SGDEX video streaming channel called "StreamFlow"
+```bash
+git clone https://github.com/Cavanaugh-Design-Studio/Roku-Engineer.git
+cd Roku-Engineer
+npm ci
+python -m pip install -r requirements.txt
+npm start
 ```
 
-Yuki will:
-- Scaffold a full project directory with `components/`, `source/`, `images/`, `locale/`
-- Generate a `manifest` with all required certification fields
-- Create a `GridView` MainScene using SGDEX
-- Wire up `Main.brs` with a proper message loop
-- Generate a `ContentFeedTask` to load and parse your JSON feed
-- Include the certification-mandatory `roAppMemoryMonitor` integration and deep link handling
+Run npm commands from the repository root. Installation builds shared libraries; `npm start` builds the desktop app. If your package manager blocks Electron’s install script, approve it or run `node node_modules/electron/install.js`.
 
-### More Examples
+For an isolated Python environment on Windows:
 
-```
-You: Add deep linking support so my channel can launch to specific content
-
-You: Integrate Roku ads with pre-roll before each video
-
-You: Create an authentication screen for my SVOD channel
-
-You: Add Roku Pay subscription support with entitlement checks
-
-You: Add a WebSocket connection for real-time entitlement updates
-
-You: Stream live notifications from my backend using Server-Sent Events
-
-You: Add rounded corners and gradient borders to my grid posters
-
-You: Set up low-memory monitoring required for certification
-
-You: Review my BrightScript for back-button handling issues
-
-You: Validate my content feed before I submit it to Roku
-
-You: Pull the debug logs from my Roku device at 192.168.1.42
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
----
+The workspace detects the root `.venv`. You can also set the Python executable in **Workspace settings** or with `ROKU_ENGINEER_PYTHON`.
 
-## 🎯 Core Capabilities
+## Enable Yuki
 
-### 🏗️ Project Types
+In **Workspace settings**, enter an Anthropic model ID available to your account and an API key. Saved keys use OS encrypted storage and are not returned to the renderer. Alternatively, set `ANTHROPIC_API_KEY` and `MAINMODEL` in your environment or root `.env`.
 
-| Type | Description |
-|---|---|
-| `basic` | Standard SceneGraph Scene with BrightScript main loop |
-| `sgdex` | SGDEX GridView as MainScene, wired for content feeds |
-| `grid` | Custom RowList/grid layout with item navigation |
+Project authoring, generators, validation, and packaging work without an AI key. Chat sends messages and files Yuki reads to Anthropic; keep credentials out of source and chat. Model availability, billing, and quota are controlled by Anthropic.
 
-```
-You: Create a basic Roku channel for a screensaver app
-You: Create an sgdex channel for a VOD streaming service
-```
+The original terminal remains available through `python roku_engineer.py`, including voice mode, Tavily research, automode, and its tool catalog. Configure services using `example.env`. See the [terminal guide](docs/terminal-guide.md) and [user guide](userguide.md).
 
-### 🔗 Deep Linking (Certification Required)
+## CLI, MCP, and remote labs
 
-Generates `deeplinkUtils.brs` in `source/` with the proper `contentId` + `mediaType` parsing pattern required for Roku Channel Store certification.
-
-```
-You: Generate a deep link handler for my project
+```bash
+npm run roku-engineer -- --help
+npm run roku-engineer -- discover
+npm run roku-engineer -- device info --ip 192.168.1.42
+npm run roku-engineer -- script validate ./test-flow.json
 ```
 
-### 📡 Content Feed Integration
+See the [device API / CLI guide](packages/roku-engineer-studio-api/README.md). Open **MCP & connections** to configure supported AI hosts; keep the app running for live device tools. The independent MCP server identity is `roku-engineer-studio`. See the [MCP guide](packages/roku-engineer-studio-mcp/README.md).
 
-Creates a `ContentFeedTask` component that:
-- Issues authenticated HTTP requests via `roUrlTransfer`
-- Parses JSON **or** XML/MRSS payloads
-- Populates a `ContentNode` tree compatible with SGDEX `GridView`
+Run `npm run ci:remote-check`, then `npm run remote-server` for a lab relay. Configure `ROKU_ENGINEER_RELAY_TOKEN` and protected networking / TLS before exposing device control outside a trusted lab. See the [relay setup](packages/roku-engineer-studio-remote-server/README.md). Cloud-emulator workflows require your own account.
 
-```
-You: Generate a JSON content feed handler for my streaming channel
-```
+## Verify and build
 
-### 📢 Roku Advertising Framework (RAF)
-
-Scaffolds a `RafTask.brs` component using the `Roku_Ads` library with:
-- `adUrl` field for dynamic ad tag injection
-- Standard ad rendering loop
-- Output signaling for post-ad continuation
-
-```
-You: Add RAF ad integration to my channel
+```bash
+npm run typecheck
+npm test
+npm run engine:test
+npm run test:engineer
+npm run studio:build
+npm run studio:smoke
+npm run build:win
 ```
 
-### 🧠 Memory Monitoring (Certification Required)
+The Electron smoke test uses an isolated profile, real IPC and Python, and scripted native pickers. Screenshots and its report go to `artifacts/studio-qa/`. Windows, macOS, and Linux build targets are included; signing and notarization require your credentials.
 
-As of **October 1, 2026**, every published app must integrate `roAppMemoryMonitor` — Static Analysis errors block publishing otherwise. The `generate_memory_monitor` tool creates `source/MemoryMonitor.brs` with:
-- `EnableMemoryWarningEvent()` subscription and `roAppMemoryNotificationEvent` handling (OS 15.2+ threshold alerts at 80/85/90/95% of the app memory limit)
-- Full coverage stats: `GetMemoryLimitPercent()`, `GetChannelAvailableMemory()`, `GetChannelMemoryLimit()`
-- `roDeviceInfo.EnableLowGeneralMemoryEvent()` fallback for devices without `roAppMemoryMonitor`
+**Verification boundaries:** generators are scaffolds; local readiness checks do not certify a channel. Use Roku’s official analysis and representative devices before submission. Hardware, installed MCP hosts, paid cloud services, and live AI calls require separate acceptance. Packet capture needs platform drivers / permissions; official static analysis requires Java 21+ and its runtime download.
 
-```
-You: Add the memory monitor integration required for certification
-```
+See the [capability inventory](docs/capability-inventory.md), [architecture](docs/architecture.md), [validation record](docs/validation.md), and [desktop installation guide](docs/studio-installation.md).
 
-### 🔌 Real-Time Communication (Roku OS 16.0+)
+## Repository
 
-- **`generate_websocket_handler`** creates a `WebSocketTask` component using the `roWebSocket` component for bi-directional server communication (live entitlements, real-time UI updates, analytics streaming)
-- **`generate_sse_handler`** creates an `SSEEventsTask` consuming Server-Sent Events via `roUrlTransfer.AsyncGetSSEvents()` and `roSSEvent` messages
+- `apps/roku-engineer-studio/` — Electron app and Engineer Workspace.
+- `packages/roku-engineer-studio-*/` — device API / CLI, MCP, network inspector, cloud client, platform helpers, relay.
+- `roku-components/` — device companion components and demo.
+- `roku_engineer.py`, `system/` — original engine and assistant prompts.
+- `engineer_bridge.py` — scoped project-authoring JSON bridge.
+- `tests/` — workspace / agent regression checks.
 
-```
-You: Add a WebSocket connection to my entitlement backend
-You: Stream live notifications from my server with SSE
-```
+## License
 
-### 🎨 SceneGraph Effect Node (Roku OS 16.0+)
-
-The new `Effect` component template generates GPU-accelerated shader effects for Poster and Rectangle nodes — rounded corners (`borderRadius`), borders (`borderWidth`/`borderColor`), and linear/radial gradients — with a `supported` check for shader-less platforms.
-
-```
-You: Add rounded corners with a purple gradient to my grid posters
-```
-
-### 💳 Roku Pay (SVOD/TVOD)
-
-`generate_roku_pay_integration` creates `source/RokuPay.brs` with:
-- Entitlement checks on every launch and resume (`getPurchases`) — certification-required for SVOD/TVOD channels
-- Catalog browsing (`doBrowse`) and purchase flows (`doOrder`)
-- The OS 16.0+ `GetRokuCustomerId` command for user identification without a prior purchase
-
-```
-You: Add Roku Pay subscription support with entitlement checks
-```
-
-### 📺 Device Interaction (Developer Mode)
-
-| Tool | What it does |
-|---|---|
-| `get_roku_device_info` | Queries device info over ECP (model, firmware, capabilities) |
-| `check_device_performance` | Pulls `chanperf` stats — includes the OS 15.2+ `<proc-stat>` raw Linux CPU/process field |
-| `capture_device_logs` | Captures BrightScript debug console output (telnet port 8085) |
-| `capture_device_screenshot` | Saves an on-screen screenshot from the device |
-
-```
-You: Connect to my Roku at 192.168.1.42 and capture 30 seconds of logs
-```
-
----
-
-## 📋 Roku OS 14/15/16 Standards
-
-### Certification Checklist
-
-- ✅ Extensionless `manifest` with all required fields
-- ✅ **`roAppMemoryMonitor` integration (mandatory as of October 1, 2026)** — `EnableMemoryWarningEvent()` + `roAppMemoryNotificationEvent` handling, or Static Analysis blocks publishing
-- ✅ **No in-app ECP commands** — apps issuing ECP requests are automatically blocked from the Streaming Store
-- ✅ Back-button navigation compliance (`roSGScreenEvent.isScreenClosed()`)
-- ✅ Deep linking (`contentId` / `mediaType` / `mediaStartTime`) at launch **and** at runtime via `roInput`
-- ✅ Roku Pay entitlement check on every launch and resume (SVOD/TVOD)
-- ✅ Accessibility compliance (screen reader support via `accessibleText`, closed captions)
-- ✅ Performance benchmarks (startup < 3s, memory < 100MB base)
-- ✅ HDR support detection (`roDeviceInfo.SupportsVideoMode`)
-- ✅ Closed captions enabled by default (`GlobalCaptionMode`)
-- ✅ RAF ad integration structure
-- ✅ Secure HTTPS with `SetCertificatesFile("common:/certs/ca-bundle.crt")`
-
-### Latest Platform Features
-
-| Roku OS | Feature Highlights |
-|---|---|
-| **OS 16.0** (dev beta) | `roWebSocket` connections, Server-Sent Events (`AsyncGetSSEvents`/`roSSEvent`), SceneGraph `Effect` node (GPU rounded corners/borders/gradients), `FloatArrayFieldInterpolator`, `ChannelStore.GetRokuCustomerId`, relaxed conditional compilation, `roTextureRequest.SetDrawable()` |
-| **OS 15.2** | Low-memory threshold events (80/85/90/95% of app limit), Perfetto BrightScript heap graph, `chanperf` `<proc-stat>` raw Linux CPU stats, Debug Protocol virtual variables, AES-GCM in `roEVPCipher`, remote repeat delay/rate APIs |
-| **OS 15.0/15.1** | Data transfer & reference-handling APIs, `roArray.ifArraySizeInfo`, `GetUptimeMillisecondsAsLong`, HLS manifest seek mode, Perfetto app tracing |
-
----
-
-## 🎛️ Interface Modes
-
-### 💬 Text Mode (Default)
-
-Rich terminal interface with syntax highlighting, panels, and progress tracking.
-
-### 🗣️ Voice Mode
-
-Hands-free development with speech recognition and ElevenLabs TTS.
-
-```
-You: Enable voice mode
-```
-
-### 🤖 Automode
-
-Autonomous multi-step execution for complex workflows.
-
-```
-You: Automode: Build a complete AVOD channel with grid navigation, deep linking, and RAF ads
-```
-
----
-
-## 🛠️ Full Tool Reference
-
-| Tool | Description |
-|---|---|
-| `create_folders` | Create nested directory structures |
-| `create_files` | Generate files — including `manifest`, `.png`, `.txt` |
-| `edit_and_apply_multiple` | AI-powered multi-file refactoring |
-| `read_multiple_files` | Batch file reading with wildcard support |
-| `list_files` | Directory listing |
-| `scan_folder` | Full project scan into Markdown documentation |
-| `tavily_search` | Real-time Roku SDK and developer info search |
-| `run_shell_command` | Execute system commands safely |
-| `create_roku_project` | Generate full project scaffolds (`basic`, `sgdex`, `grid`) with memory monitor + deep links built in |
-| `create_roku_component` | Create typed SceneGraph + BrightScript component pairs (incl. `Effect`, `WebSocketTask`) |
-| `generate_deep_link_handler` | Certification-ready deep link routing utilities (launch args + `roInput`) |
-| `generate_content_feed_handler` | JSON/MRSS → ContentNode HTTP Task scaffolding |
-| `generate_raf_integration` | Roku Advertising Framework Task boilerplate |
-| `generate_memory_monitor` | `roAppMemoryMonitor` low-memory event integration (certification-mandatory) |
-| `generate_websocket_handler` | `roWebSocket` bi-directional communication Task (OS 16.0+) |
-| `generate_sse_handler` | Server-Sent Events consumer Task (OS 16.0+) |
-| `generate_roku_pay_integration` | ChannelStore entitlement/purchase flows for SVOD/TVOD |
-| `validate_content_feed` | Direct Publisher JSON feed schema validation |
-| `get_roku_device_info` | ECP `query/device-info` device details |
-| `check_device_performance` | ECP `query/chanperf` stats with OS 15.2+ `<proc-stat>` |
-| `capture_device_screenshot` | Developer-mode screenshot capture |
-| `capture_device_logs` | Debug console log capture (telnet 8085) |
-| `package_roku_app` | Package channel into deployment-ready `.zip` |
-| `create_modern_manifest` | Certification-complete `manifest` generation |
-| `generate_component_registry` | Document all SceneGraph components in a project |
-| `validate_roku_project` | Full certification-level project validation |
-| `validate_roku_component` / `validate_scenegraph_component` | Component XML structure + accessibility validation |
-| `validate_roku_manifest` | Manifest field validation |
-| `lint_brightscript` | BrightScript static analysis (incl. ECP prohibition + memory monitor checks) |
-| `create_accessibility_helpers` / `create_performance_monitoring` | Accessibility and performance helper code generation |
-
----
-
-## 📊 Performance & Configuration
-
-### Environment Variables
-
-```env
-ANTHROPIC_API_KEY=         # Required — Claude AI
-TAVILY_API_KEY=            # Required — Web research
-ELEVEN_LABS_API_KEY=       # Optional — Voice TTS
-VOICE_ID=                  # Optional — ElevenLabs voice
-MAINMODEL=claude-sonnet-5-5
-MAX_CONTEXT_TOKENS=1000000  # 1M token context window
-MAX_CONTINUATION_ITERATIONS=25
-THINKING_EFFORT=high          # high (default) | medium | low
-```
-
-### Token Management
-
-- Real-time token usage tracking per session
-- Per-model cost monitoring
-- Intelligent caching for large project contexts
-
----
-
-## 🔐 Security & Privacy
-
-- All file operations run locally
-- API keys are loaded exclusively from `.env`
-- No persistent session data is stored remotely
-- Secure HTTPS enforced in all generated Roku network code
-
----
-
-## 📖 Resources
-
-- 📘 [User Guide](userguide.md) — Detailed usage walkthrough
-- 🧑‍💻 [Roku Developer Docs](https://developer.roku.com/docs)
-- 📺 [SGDEX GitHub](https://github.com/rokudev/SceneGraphDeveloperExtensions)
-- 🔖 [Roku Certification Checklist](https://developer.roku.com/docs/developer-program/certification/certification.md)
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes
-4. Submit a pull request
-
----
-
-## 📝 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-
-**Built with ❤️ for the Roku developer community**
-
-*Empowering developers to build amazing, certified Roku channels — faster.*
-
-</div>
+MIT. See [LICENSE](LICENSE) and the separate [distribution notices](third_party/NOTICE.md).

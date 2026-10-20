@@ -1,0 +1,363 @@
+/**
+ * Brazilian Portuguese (pt-BR) translation of the Settings window strings
+ * (General, MCP, Network Inspector, timing/validation, …). Sibling of
+ * ../settings.ts — same `settings` shape, keys, order, and function signatures.
+ *
+ * Parametrized strings are functions returning the composed text. Only literal
+ * display text is translated; product/feature names and tech tokens are verbatim.
+ */
+export const settings = {
+  // Bootstrap / fatal
+  apiUnavailable: 'API de configurações indisponível.',
+  loadFailedMessage: 'Falha ao abrir as Configurações. Tente novamente.',
+
+  // General section
+  noFolderSet: 'Nenhuma pasta definida',
+  logFilePath: (path: string): string => `Arquivo de log: ${path}`,
+
+  // Password storage / keychain
+  keychainUnencryptedConfirm:
+    'Seu sistema não oferece um chaveiro de criptografia real. Ativar isso armazena as senhas como texto puro codificado no disco, sem criptografia. Continuar?',
+  keychainOff: 'A opção de criptografia está desativada — as senhas lembradas são armazenadas como texto puro no disco.',
+  keychainDefaultBackend: 'Chaveiro do sistema',
+  keychainEncrypted: (backend: string): string => `Armazenamento: criptografado via ${backend}.`,
+  keychainUnencrypted:
+    'Aviso: a opção está ativada, mas este sistema usa texto básico — as senhas são texto puro codificado em Base64 no disco. Use um chaveiro do Linux (Secret Service/KWallet) para criptografia real.',
+  keychainUnavailable:
+    'Aviso: a opção está ativada, mas o chaveiro do sistema operacional está indisponível — as senhas permanecem na memória apenas nesta sessão.',
+  keychainStatus: (status: string, backend: string): string =>
+    `Status do armazenamento: ${status}${backend ? ` (${backend})` : ''}.`,
+
+  // MCP Server section
+  // Client row labels (product/brand names — same across locales, but sourced here so the
+  // catalog is the single place UI text lives). Keys match main's McpClientId union.
+  mcpClientLabels: {
+    chatgpt: 'ChatGPT Desktop',
+    claude: 'Claude Desktop',
+    cursor: 'Cursor',
+    vscode: 'Visual Studio Code',
+    'vscode-insiders': 'VS Code Insiders',
+    vscodium: 'VSCodium',
+    windsurf: 'Windsurf',
+  },
+  // MCP panel help blurb — contains <a>/<code>, rendered via data-i18n-html.
+  mcpServerBlurbHtml: `Exponha o Roku Engineer Studio a agentes de IA via <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer" class="mcp-link">Model Context Protocol</a>. Ative um cliente para adicionar ou remover a entrada de servidor MCP <code class="mcp-inline-code">roku-engineer-studio</code> dele; outras entradas permanecem intactas.`,
+  mcpNoClients: 'Nenhum cliente MCP compatível detectado neste sistema.',
+  mcpInstalled: 'Instalado',
+  mcpNotDetected: 'Não detectado',
+  mcpOpenConfigTitle: (path: string): string => `Abrir ${path}`,
+  mcpOpenConfigAria: (label: string): string => `Abrir o arquivo de configuração do MCP para ${label}`,
+  mcpOpenConfigFile: 'Abrir arquivo de configuração',
+  mcpInstallToEnable: (label: string): string => `Instale ${label} para ativar.`,
+  mcpEnableAria: (label: string): string => `Ativar MCP para ${label}`,
+  mcpToolsButton: 'Ver ferramentas MCP',
+  mcpToolsModalTitle: 'Ferramentas MCP',
+  mcpToolsModalAria: 'Ferramentas MCP expostas a agentes de IA',
+  mcpToolsIntro: (count: number): string =>
+    `As ${count} ferramentas que o Roku Engineer Studio expõe a agentes de IA via Model Context Protocol, agrupadas por área.`,
+  mcpToolCategories: {
+    discovery: 'Conexão e descoberta de dispositivos',
+    remote: 'Controle remoto e ECP',
+    sideload: 'Sideload',
+    telnet: 'Telnet e console',
+    appConnector: 'App Connector e RALE',
+    debugger: 'Depurador',
+    networkInspector: 'Inspetor de rede',
+    actionScripts: 'Scripts de ação',
+  },
+  mcpToolDescriptions: {
+    probe_bridge: 'Verificar se o próprio Roku Engineer Studio está em execução e acessível.',
+    scan_devices: 'Descobrir dispositivos Roku na rede local (SSDP + varredura opcional de subrede).',
+    list_devices: 'Listar todos os dispositivos que o Dev Studio já conhece — conectados, descobertos ou lembrados.',
+    connect_device: 'Abrir ou focar uma aba do Dev Studio para um dispositivo específico.',
+    test_connection: 'Testar a acessibilidade ECP de um IP de dispositivo.',
+    get_selected_device: 'Retornar a aba de dispositivo atualmente focada no Dev Studio.',
+    keypress: 'Enviar uma tecla remota ECP (Cima / Baixo / Selecionar / Início / Reproduzir / …).',
+    input_text: 'Digitar texto literal no campo de entrada atualmente focado.',
+    launch_app: 'Iniciar um canal na sua tela inicial.',
+    deep_link: 'Iniciar um canal diretamente em um conteúdo específico via link profundo ECP.',
+    ecp_query: 'Executar um GET ECP somente leitura — informações do dispositivo, apps instalados, app ativo, estado do player, …',
+    ecp_post: 'Enviar um POST para um endpoint ECP arbitrário (com efeitos colaterais).',
+    screenshot: 'Capturar a tela atual do dispositivo, retornada inline como imagem.',
+    get_app_icon: 'Obter o ícone de um canal.',
+    device_performance_metrics: 'Dados de séries temporais de CPU / Memória / Objetos BrightScript durante um período solicitado, com uma legenda de decodificação.',
+    sideload: 'Enviar e instalar um pacote .zip do canal, substituindo o Dev App atual.',
+    delete_sideload: 'Remover o Dev App atualmente instalado via sideload.',
+    telnet_connect: 'Abrir o console de depuração BrightScript (porta 8085).',
+    telnet_disconnect: 'Fechar o console de depuração BrightScript.',
+    get_telnet_log: 'Ler as linhas do console armazenadas em buffer desde a conexão.',
+    console_monitor_findings: 'Analisar o buffer do console em busca de problemas e falhas reconhecidos do BrightScript.',
+    app_connector_connect: 'Abrir uma sessão RALE / App Connector com o Dev App em execução.',
+    app_connector_disconnect: 'Fechar a sessão RALE / App Connector.',
+    app_function: 'Invocar uma função exposta pelo canal através do App Connector.',
+    list_app_connector_functions: 'Listar as funções RALE disponíveis do canal em execução e seus parâmetros.',
+    rale_command: 'Executar qualquer comando RALE embutido, incluindo operações destrutivas de registro.',
+    rale_get_node_by_id: 'Busca somente leitura de um nó SceneGraph pelo id.',
+    debugger_attach: 'Abrir uma sessão de depuração BrightScript (o canal deve ser iniciado com depuração ativada).',
+    debugger_status: 'Retornar o estado da sessão sem bloquear.',
+    debugger_set_breakpoints: 'Adicionar breakpoints — registrados imediatamente se estiver parado.',
+    debugger_list_breakpoints: 'Listar os breakpoints rastreados e seu estado (verificado / na fila).',
+    debugger_remove_breakpoints: 'Remover breakpoints por arquivo e linha.',
+    debugger_pause: 'Solicitar a parada de um canal em execução.',
+    debugger_continue: 'Retomar a execução a partir de um estado parado.',
+    debugger_step: 'Executar passo a passo a thread parada (over / in / out).',
+    debugger_wait_for_stop: 'Bloquear até a próxima parada, retornando um snapshot completo.',
+    debugger_get_callstack: 'Retornar os quadros da pilha de chamadas da thread parada.',
+    debugger_get_variables: 'Retornar as variáveis no escopo de um quadro da pilha.',
+    debugger_evaluate: 'Executar uma expressão BrightScript no quadro parado (REPL).',
+    debugger_detach: 'Fechar a sessão de depuração.',
+    network_inspector_status: 'Relatar o estado de captura / MITM e os pré-requisitos de configuração.',
+    network_inspector_list_events: 'Listar os eventos de rede capturados como resumos leves e filtráveis.',
+    network_inspector_get_event_detail: 'Obter os cabeçalhos e o corpo completos de um evento capturado.',
+    network_inspector_find: 'Busca de texto completo nas URLs, cabeçalhos e corpos capturados.',
+    network_inspector_analyze: 'Agregar o buffer em pontos críticos e resumos — status, hosts, tipos de conteúdo.',
+    network_inspector_get_ca_info: 'Retornar a impressão digital da CA MITM e as informações do proxy para descriptografia HTTPS.',
+    list_action_types: 'Listar todos os tipos de etapa de Action Script suportados.',
+    get_action_schema: 'Retornar o esquema de criação para um tipo de etapa.',
+    get_capability_bundle: 'Um único payload com todas as capacidades estáticas — ações, vocabulário, predefinições, contrato de criação.',
+    validate_script: 'Validar um Action Script de múltiplas etapas antes de enviá-lo ao builder.',
+    send_script_to_builder: 'Enviar um Action Script validado para o Dev Studio Builder para revisão.',
+  },
+
+  // Network Inspector — status line
+  niStatusDisabled: 'Status: desativado — salve após ativar para começar a monitorar os clientes do hotspot.',
+  niPlatformMac: 'bridge100 no macOS',
+  niPlatformWin: 'adaptador virtual no Windows',
+  niPlatformLinux: 'interface de hotspot no Linux',
+  niStatusEnabled: (platformHint: string): string =>
+    `Status: ativado — aguardando a interface de hotspot (${platformHint}).`,
+  niMitmSuffix: (port: number): string => ` · proxy MITM na porta ${port}`,
+
+  // Network Inspector — capture setup (BPF)
+  captureAccessEnabled: 'Acesso à captura ativado',
+  setupNeeded: 'Configuração necessária',
+  // Static default for the setup modal <h2>; JS replaces it with a platform-suffixed title.
+  hotspotCaptureSetupModalTitle: 'Configuração da captura por hotspot',
+  niSetupRowDescOk: 'Opcional — apenas para a captura de DNS/SNI do hotspot. O proxy não requer configuração.',
+  niSetupRowDescNeeds: 'A captura do hotspot requer configuração — abra para ativá-la. (O proxy continua funcionando.)',
+  niSetupPacketCapture: 'Configurar captura de pacotes',
+  bpfWaitingApproval: 'Aguardando a aprovação do administrador…',
+  bpfInstalled: 'Acesso à captura de pacotes instalado.',
+  bpfInstalledHint: 'Instalado — volte para a aba do Inspetor de rede.',
+  bpfCancelled: 'Cancelado.',
+  bpfSetupFailed: 'Falha na configuração.',
+
+  niSetupGuide: {
+    titlePrefix: `Configuração da captura por hotspot`,
+    darwin: {
+      intro: `<strong>Opcional — apenas para captura por hotspot.</strong> A descriptografia do seu canal dev carregado via sideload funciona em qualquer rede sem esta configuração. Estas etapas adicionam a captura por hotspot de DNS/TLS SNI de <em>todo</em> o tráfego de um Roku pelo hotspot de Compartilhamento de Internet do seu Mac (<code class="mcp-inline-code">bridge100</code>). Apenas dispositivos locais.`,
+      enableSharing: `<strong>Ative o Compartilhamento de Internet</strong> — o RDS captura em <code class="mcp-inline-code">bridge100</code> assim que estiver ativado:`,
+      sharingSteps: [
+        `Abra <strong>Ajustes do Sistema → Geral → Compartilhamento</strong>`,
+        `Ative o <strong>Compartilhamento de Internet</strong>, compartilhando <strong>via Wi-Fi</strong>`,
+        `Conecte o seu Roku à rede Wi-Fi compartilhada do Mac`
+      ],
+      captureHead: `Acesso à captura de pacotes`,
+      captureBody: `O macOS cria <code class="mcp-inline-code">/dev/bpf*</code> com acesso apenas para root. Execute a configuração única abaixo para restaurar o acesso após reinicializações (é necessária a senha de administrador, como o ChmodBPF do Wireshark). Ou instale o <a href="https://www.wireshark.org/download.html" target="_blank" rel="noopener noreferrer" class="mcp-link">Wireshark</a> e execute o instalador do ChmodBPF dele.`
+    },
+    win32: {
+      intro: `<strong>Opcional — apenas para captura por hotspot.</strong> A descriptografia do seu canal dev carregado via sideload funciona em qualquer rede sem esta configuração (o proxy MITM lida tanto com a mesma rede Wi-Fi quanto com o hotspot). Estas etapas adicionam a captura por hotspot de DNS/TLS SNI de <em>todo</em> o tráfego de um Roku quando ele está conectado pelo hotspot deste PC. Apenas dispositivos locais.`,
+      enableHotspot: `<strong>Ative um hotspot você mesmo (opcional)</strong> — o RDS não altera as configurações de rede do Windows; você tem o controle:`,
+      hotspotSteps: [
+        `Abra <strong>Configurações → Rede &amp; Internet → Ponto de acesso móvel</strong>`,
+        `Ative o <strong>Ponto de acesso móvel</strong> (compartilhe via Wi-Fi)`,
+        `Conecte o seu Roku a esse hotspot — o RDS detecta o adaptador virtual automaticamente`
+      ],
+      npcapHead: `Acesso à captura por hotspot (Npcap)`,
+      npcapBody: `A captura por hotspot (DNS/TLS SNI de todo o tráfego do Roku) precisa do driver <a href="https://npcap.com/" target="_blank" rel="noopener noreferrer" class="mcp-link">Npcap</a>. Isto é opcional — sem ele, o proxy MITM ainda registra o seu canal dev carregado via sideload.`,
+      npcapSteps: [
+        `Baixe e execute o instalador em <a href="https://npcap.com/" target="_blank" rel="noopener noreferrer" class="mcp-link">npcap.com</a>`,
+        `Durante a instalação, ative <strong>“Install Npcap in WinPcap API-compatible Mode”</strong>`,
+        `<strong>Reinicie o Roku Engineer Studio</strong> após a instalação para que o módulo de captura incluído seja carregado`
+      ],
+      npcapNote: `Já tem o Npcap, mas a captura ainda não inicia? Reinstale o Roku Engineer Studio para que o módulo de captura nativo corresponda a esta versão.`
+    },
+    linux: {
+      intro: `<strong>Opcional — apenas para captura por hotspot.</strong> A descriptografia do seu canal dev carregado via sideload funciona em qualquer rede sem esta configuração. Estas etapas adicionam a captura por hotspot de DNS/TLS SNI de <em>todo</em> o tráfego de um Roku compartilhando a conexão desta máquina. Apenas dispositivos locais.`,
+      shareConnection: `<strong>Compartilhe a sua conexão</strong> para que o Roku seja roteado por esta máquina:`,
+      shareSteps: [
+        `Use o NetworkManager → <strong>“Compartilhado com outros computadores”</strong> em uma conexão Wi-Fi/Ethernet (gateway <code class="mcp-inline-code">10.42.0.1</code>), ou execute um hotspot hostapd`,
+        `Conecte o seu Roku a essa rede compartilhada — o RDS detecta a interface do gateway automaticamente`
+      ],
+      captureHead: `Acesso à captura de pacotes`,
+      captureBody: `O Linux captura via <code class="mcp-inline-code">tcpdump</code>, que precisa de privilégios de raw socket. Execute a configuração única abaixo (solicitação de administrador) para conceder as capabilities <code class="mcp-inline-code">cap_net_raw</code>/<code class="mcp-inline-code">cap_net_admin</code> — ou manualmente: <code class="mcp-inline-code">sudo setcap cap_net_raw,cap_net_admin=eip $(which tcpdump)</code>.`
+    }
+  },
+  // Network Inspector — place selector + Remote Locations
+  placeLocal: 'Local (esta máquina)',
+  placeRemoteFallback: 'Remoto',
+  niRemoteRequiresRoot:
+    'Este local exige que o servidor remoto seja executado como root para ativar o Inspetor de rede.',
+  niRemoteUnsupported:
+    'Este local não oferece suporte ao Inspetor de rede. Atualize este servidor remoto para a funcionalidade do Inspetor de rede.',
+  niDisabled: 'O Inspetor de rede está desativado.',
+  niEditingRemote: 'Editando as configurações do local remoto. A captura é executada no servidor remoto.',
+  niPortConflictTitle: 'Porta do proxy indisponível',
+  niRemoteUnavailable: 'O Inspetor de rede remoto não está disponível nesta compilação.',
+  niCheckingRemote: 'Verificando o local remoto…',
+  niCouldNotReachRemote: 'Não foi possível acessar o local remoto.',
+
+  // Network Inspector — enable confirm + save status
+  niConfirmEnable:
+    'O Inspetor de rede vai capturar o tráfego do Roku e armazená-lo localmente nesta máquina — por meio do proxy MITM e, se configurado, da captura de hotspot/rede compartilhada. Continuar?',
+  niSaved: 'Configurações do Inspetor de rede salvas.',
+  niSavedRemote: 'Salvo no local remoto.',
+  niRemoteSaveFailed: 'Falha ao salvar remotamente',
+
+  // Timing & Network row labels (title + hint per timing key), localized here so the
+  // Settings UI renders them in the active language. Numeric min/max bounds still come
+  // from the main process via `timingMeta`.
+  timingLabels: {
+    DEFAULT_RALE_PORT: { title: 'RALE / App Connector Port', hint: 'TCP Port (padrão 49200).' },
+    SCREENSHOT_DEBOUNCE_DELAY: { title: 'Debounce da captura de tela (ms)', hint: 'Atraso após pressionar a tecla antes da captura automática.' },
+    SCREENSHOT_AFTER_LAUNCH_DELAY: { title: 'Captura de tela após iniciar (ms)', hint: 'Espera após iniciar o Dev App antes da captura de tela.' },
+    TELNET_TIMEOUT: { title: 'Tempo limite de conexão Telnet (ms)', hint: 'Console de depuração / Telnet do sistema.' },
+    CONNECTION_CHECK_INTERVAL: { title: 'Verificação de dispositivo ativo (ms)', hint: 'Com que frequência os dispositivos conectados são consultados: informações do dispositivo, estado ECP e se o canal do Dev App está em primeiro plano.' },
+    DEVICE_METRICS_SAMPLE_INTERVAL_MS: { title: 'Taxa de amostragem (ms)', hint: 'Cadência de consulta do Chanperf + contagem de objetos. Menor = dados mais recentes, mais tráfego ECP; requer o Modo de desenvolvedor e Control by Mobile Apps.' },
+    DEVICE_METRICS_CHART_HISTORY_MS: { title: 'Tempo de histórico do gráfico (minutos)', hint: 'Até onde os gráficos de CPU e System Memory retrocedem' },
+    TOAST_DISPLAY_DURATION: { title: 'Duração do toast (s)', hint: 'Visibilidade do toast de sucesso/erro.' },
+    STATUS_MESSAGE_DURATION: { title: 'Duração da mensagem de status (s)', hint: 'Visibilidade da linha de status do cabeçalho.' },
+  },
+
+  // Timing bounds + validation
+  timingValueFallback: 'Valor',
+  timingBoundMin: (value: string | number): string => `Mín: ${value}`,
+  timingBoundMax: (value: string | number): string => `Máx: ${value}`,
+  timingMustBeWholeNumber: (label: string): string => `${label} deve ser um número inteiro.`,
+  timingMustBeAtLeast: (label: string, bound: string): string => `${label} deve ser no mínimo ${bound}.`,
+  timingMustBeAtMost: (label: string, bound: string): string => `${label} deve ser no máximo ${bound}.`,
+  timingMoreOutOfRange: (n: number): string => ` (mais ${n} fora do intervalo)`,
+  timingClamped: (label: string, value: string, which: string): string =>
+    `${label} ajustado para ${value} (${which}).`,
+  timingClampMinimum: 'mínimo',
+  timingClampMaximum: 'máximo',
+
+  // Save status messages
+  generalSaved: 'Configurações gerais salvas.',
+  actionScriptsSaved: 'Configurações de Action Scripts salvas.',
+  devicePerfSaved: 'Configurações de desempenho do dispositivo salvas.',
+  timingSaved: 'Configurações de tempos e rede salvas.',
+  mcpSaved: 'Configurações do servidor MCP salvas.',
+  saveFailed: 'Falha ao salvar',
+  saveWriteFailedError: 'Não foi possível gravar o arquivo de configurações.',
+  mcpConfigUpdateWarning: (summary: string): string =>
+    `A atualização da configuração do cliente MCP teve erros: ${summary}`,
+
+  // ── Static settings.html shell ──────────────────────────────────────────
+  // Header + nav
+  windowTitle: 'Configurações — Roku Engineer Studio',
+  heading: 'Configurações',
+  navAria: 'Seções de configurações',
+  tabGeneral: 'Geral',
+  tabActionScripts: 'Scripts de ação',
+  tabDevicePerformance: 'Desempenho do dispositivo',
+  tabTiming: 'Tempos e rede',
+  tabNetworkInspector: 'Inspetor de rede',
+  tabSideloadRelay: 'Sideload Relay',
+  tabMcpServer: 'Servidor MCP',
+  // Shared across every section's save dock
+  resetToDefaults: 'Restaurar padrões',
+
+  // General section — toggle labels, descriptions, and (screen-reader) aria labels
+  language: 'Idioma',
+  languageDesc: 'Idioma de exibição da interface do aplicativo.',
+  languageAria: 'Idioma de exibição',
+  languageSystemDefault: (name: string): string => `Padrão do sistema (${name})`,
+  developerMode: 'Modo de desenvolvedor',
+  developerModeDesc: 'Registro extra na janela principal (o mesmo que Arquivo → Modo de desenvolvedor).',
+  developerModeAria: 'Modo de desenvolvedor',
+  privacyMode: 'Modo de privacidade',
+  privacyModeDesc: 'Mascarar IPs e números de série na interface (o mesmo que Arquivo → Modo de privacidade).',
+  privacyModeAria: 'Modo de privacidade',
+  debugLogging: 'Registro de depuração em arquivo',
+  debugLogHint: 'Grava no arquivo de log dentro dos dados de usuário do aplicativo quando ativado.',
+  debugLoggingAria: 'Registro de depuração em arquivo',
+  useKeyboardRemote: 'Usar o teclado para o controle remoto do Roku',
+  useKeyboardRemoteDesc:
+    'Quando ativado, você pode usar o teclado para controlar o Roku. Os atalhos de teclado estão listados na janela de ajuda do controle remoto.',
+  useKeyboardRemoteAria: 'Controle remoto do Roku - Usar o teclado ',
+  tryDemoAppToggle: 'Mostrar Botão Experimentar App de Demonstração',
+  tryDemoAppToggleDesc:
+    'Quando ativado, um botão Experimentar App de Demonstração aparece na barra de título para carregar o canal de demonstração Roku Engineer Studio Showcase incluso em um dispositivo.',
+  tryDemoAppToggleAria: 'Mostrar botão experimentar app de demonstração',
+  tryDemoAppOpenBtn: 'Abrir App de Demonstração',
+  tryDemoAppOpenBtnAria: 'Abrir o seletor experimentar app de demonstração',
+  // Placeholder: reuse the English Crash Reporting toggle strings until a translation exists.
+  crashReportingToggle: 'Show Crash Reports',
+  crashReportingToggleDesc:
+    'When On, an uncaught error shows a report modal with details you can file as a GitHub issue.',
+  crashReportingToggleAria: 'Show crash reports',
+  autoConnect: 'Conectar automaticamente aos dispositivos',
+  autoConnectDesc:
+    'Quando ativado, o aplicativo se conectará automaticamente aos dispositivos que permaneceram conectados ao fechar o aplicativo na sessão anterior.',
+  autoHideSidebar: 'Ocultar a barra lateral automaticamente',
+  autoHideSidebarDesc:
+    'Quando ativado, a barra lateral, que apresenta a lista de dispositivos, será alternada automaticamente se estivesse oculta na sessão anterior.',
+  encryptPasswords: 'Criptografar as senhas salvas com o chaveiro do sistema',
+  encryptPasswordsDesc:
+    'Criptografe a senha lembrada de cada dispositivo por meio do chaveiro do sistema operacional. Quando desativado, ela é mantida, mas armazenada sem criptografia no disco.',
+  encryptPasswordsAria: 'Manter as senhas salvas no chaveiro do sistema',
+
+  // Action Scripts section
+  actionScriptsBlurb:
+    'Pasta padrão para capturas de tela e logs quando um script precisa salvar. Você ainda pode escolher outra pasta a cada execução.',
+  chooseFolder: 'Escolher pasta…',
+
+  // Device Performance section
+  devicePerfIntroHtml: `Aplica-se enquanto <strong>Mostrar desempenho do dispositivo</strong> está ativado, o Roku tem o modo de desenvolvedor e o Dev App está em primeiro plano. Quando <strong>Lembrar 'Mostrar desempenho do dispositivo'</strong> está ativado abaixo, a seção do controle remoto restaura o layout em quadrante por dispositivo.`,
+  rememberDevicePerf: "Lembrar 'Mostrar desempenho do dispositivo'",
+  rememberDevicePerfAria: 'Lembrar mostrar ou ocultar o desempenho do dispositivo por dispositivo',
+  // Row description — contains <strong>, rendered via data-i18n-html.
+  rememberDevicePerfDescHtml: `Restaura se <strong>Mostrar desempenho do dispositivo</strong> estava ativado para cada dispositivo. Desative para sempre começar apenas com a seção do controle remoto até você ativá-lo novamente.`,
+
+  // Network Inspector section — place selector + field labels
+  location: 'Local',
+  niPlaceAria: 'Local do Inspetor de rede',
+  enableNetworkInspector: 'Ativar o Inspetor de rede',
+  enableNetworkInspectorDesc:
+    'Inspecione o tráfego de rede de um dispositivo. Descriptografa o HTTPS do seu canal de desenvolvedor pelo proxy local (qualquer rede); um hotspot também captura DNS/SNI. Armazenado apenas localmente.',
+  mitmProxyPort: 'Porta do proxy MITM',
+  mitmProxyPortDesc:
+    'Porta em que o proxy local de descriptografia escuta. Roteie seu canal de desenvolvedor carregado via sideload por ela — canais de fábrica não podem ser interceptados.',
+  mitmProxyPortAria: 'Porta do proxy MITM',
+  packetLimit: 'Limite de pacotes por dispositivo',
+  packetLimitDesc:
+    'Quadros mantidos por dispositivo para a exportação PCAP. Maior = mais histórico e memória.',
+  packetLimitAria: 'Limite de pacotes por dispositivo',
+  maxBodySize: 'Tamanho máximo do corpo (KB)',
+  maxBodySizeDesc:
+    'Quanto de cada corpo de requisição/resposta é mantido para visualização. Acima do limite, um selo "Body Truncated" é exibido (o dispositivo não é afetado). Aplica-se apenas ao novo tráfego.',
+  maxBodySizeAria: 'Tamanho máximo do corpo retido em KB',
+  hotspotCaptureSetup: 'Configuração de hotspot e captura',
+  viewSetup: 'Ver configuração',
+
+  // Sideload Relay section — intro bullets. The first bullet has inline markup (<span>/<code>,
+  // whose #srRelayUrlWrap/#srRelayUrl are populated at runtime) so it's rendered via data-i18n-html.
+  srIntro1Html: `Aponte sua ferramenta de sideload (VS Code com a extensão BrightScript, Eclipse ou a CLI roku-deploy)<span id="srRelayUrlWrap" hidden> — ou um navegador em <code id="srRelayUrl">http://…/</code></span> — para cá em vez de um único Roku.`,
+  srIntro2: 'O RDS aceita o sideload uma vez, depois o instala em cada destino ativado, inicia o Dev App e abre cada console.',
+  srIntro3: 'Os sideloads desta máquina prosseguem automaticamente.',
+  srIntro4: 'Um sideload de outro dispositivo na LAN precisa da senha de desenvolvedor e pede que você o permita.',
+
+  // ── Network Inspector — Certificate Authority card (surface the CA) ──
+  caSectionTitle: 'Autoridade de certificação',
+  caRowDesc: 'A autoridade de certificação local que o proxy usa para descriptografar o HTTPS.',
+  caRowDescRemote: 'A autoridade de certificação deste local, usada pelo proxy dele para descriptografar o HTTPS.',
+  caViewCert: 'Ver certificado',
+  caSectionDesc:
+    'O Inspetor de rede assina o HTTPS descriptografado com uma autoridade de certificação local. Confie nela ou importe-a no dispositivo para que seu canal de desenvolvedor aceite o proxy. A chave privada nunca sai desta máquina.',
+  caSectionDescRemote:
+    'O Inspetor de rede assina o HTTPS descriptografado com a autoridade de certificação deste local. Confie nela ou importe-a no dispositivo para que seu canal de desenvolvedor aceite o proxy. A chave privada nunca sai daquele servidor.',
+  caSubject: 'Assunto',
+  caFingerprint: 'Impressão digital SHA-256',
+  caValidity: 'Validade',
+  caProxyAddress: 'Endereço do proxy',
+  caValidityRange: (from: string, to: string): string => `${from} – ${to}`,
+  caLoading: 'Carregando detalhes do certificado…',
+  caUnavailable: 'Os detalhes do certificado estão indisponíveis.',
+  caExportAction: 'Exportar',
+  exportCaPem: 'Exportar .pem',
+  exportCaCrt: 'Exportar .crt',
+  caExportedPem: 'CA exportada como .pem.',
+  caExportedCrt: 'CA exportada como .crt.',
+  caExportFailed: 'Falha na exportação.',
+};

@@ -215,14 +215,10 @@ USE_FUZZY_SEARCH = True
 
 # Initialize clients
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-if not anthropic_api_key:
-    raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
-client = Anthropic(api_key=anthropic_api_key)
+client = Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
 
 tavily_api_key = os.getenv("TAVILY_API_KEY")
-if not tavily_api_key:
-    raise ValueError("TAVILY_API_KEY not found in environment variables")
-tavily = TavilyClient(api_key=tavily_api_key)
+tavily = TavilyClient(api_key=tavily_api_key) if tavily_api_key else None
 
 console = Console()
 
@@ -1206,6 +1202,8 @@ def tavily_search(query: str) -> str:
         The search result or an error message.
     """
     try:
+        if tavily is None:
+            return "Set TAVILY_API_KEY to enable web research. Local project tools remain available."
         response = tavily.qna_search(query=query, search_depth="advanced")
         return response
     except APIError as e:
@@ -3284,6 +3282,9 @@ async def chat_with_yuki(
 ):
     global conversation_history, automode, main_model_tokens, use_tts, tts_enabled
 
+    if client is None:
+        return "Set ANTHROPIC_API_KEY to enable Yuki chat. Local project tools remain available.", False
+
     # Input validation
     if not isinstance(user_input, str):
         raise ValueError("user_input must be a string")
@@ -4884,9 +4885,13 @@ async def generate_content_feed_handler(
         if not success:
             return False, msg
 
-        brs_path = os.path.join(project_dir, "components", "ContentFeedTask.brs")
+        brs_path = os.path.join(project_dir, "components", "ContentFeedTask", "ContentFeedTask.brs")
+        xml_path = os.path.join(project_dir, "components", "ContentFeedTask", "ContentFeedTask.xml")
+        with open(xml_path, "r", encoding="utf-8") as xml_file:
+            xml_content = xml_file.read().replace('id="output" type="assocarray"', 'id="output" type="node"')
+        await _create_file_with_header(xml_path, xml_content)
         if feed_type == "json":
-            parse_logic = """        jsonString = request.GetToString()
+            parse_logic = """        jsonString = response
         if jsonString <> invalid and jsonString <> ""
             jsonObj = ParseJson(jsonString)
             if jsonObj <> invalid and jsonObj.items <> invalid
@@ -4905,7 +4910,7 @@ async def generate_content_feed_handler(
             m.top.error = "Empty response from feed URL"
         end if"""
         else:
-            parse_logic = """        xmlString = request.GetToString()
+            parse_logic = """        xmlString = response
         if xmlString <> invalid and xmlString <> ""
             xmlObj = CreateObject("roXMLElement")
             if xmlObj.Parse(xmlString)
@@ -4927,12 +4932,17 @@ async def generate_content_feed_handler(
 end function
 
 function LoadFeed()
+    if m.top.input = invalid or m.top.input.url = invalid
+        m.top.error = "Missing feed URL in input.url"
+        return invalid
+    end if
     request = CreateObject("roUrlTransfer")
     request.SetCertificatesFile("common:/certs/ca-bundle.crt")
     request.SetUrl(m.top.input.url)
     response = request.GetToString()
     if response = invalid
         m.top.error = "HTTP request failed for feed URL"
+        return invalid
     end if
 {parse_logic}
 end function"""
@@ -4952,7 +4962,7 @@ async def generate_raf_integration(project_dir: str) -> Tuple[bool, str]:
         if not success:
             return False, msg
 
-        brs_path = os.path.join(project_dir, "components", "RafTask.brs")
+        brs_path = os.path.join(project_dir, "components", "RafTask", "RafTask.brs")
         raf_logic = """Library "Roku_Ads.brs"
 
 function Init()

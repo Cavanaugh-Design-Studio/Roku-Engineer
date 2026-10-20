@@ -1,0 +1,31 @@
+name: Verify Roku Engineer
+on: [push, pull_request]
+jobs:
+  source:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: npm ci
+      - run: python -m pip install -r requirements.txt
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run engine:test
+      - run: npm run test:engineer
+      - run: npm run studio:build
+      - run: npm run ci:remote-check
+      - run: npm run smoke:transports
+      - run: npm run studio:smoke
+      - run: node scripts/verify-window-controls.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-qa
+          path: artifacts/

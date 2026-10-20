@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="settings.windowTitle">Settings — Roku Engineer Studio</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self';">
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <div id="settingsAnimateRoot" class="settings-animate-root">
+  <div class="settings-header">
+    <h1>
+      <span data-i18n="settings.heading">Settings</span>
+      <span class="settings-header-delim" aria-hidden="true">›</span>
+      <span id="settingsHeaderSection" class="settings-header-section" data-i18n="settings.tabGeneral">General</span>
+    </h1>
+    <button type="button" class="modal-close" id="btnHeaderClose" title="Close" aria-label="Close" data-i18n-title="common.close" data-i18n-aria-label="common.close">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+  <div class="settings-main">
+    <nav class="settings-nav" role="tablist" aria-label="Settings sections" data-i18n-aria-label="settings.navAria">
+      <button type="button" class="settings-nav-item active" role="tab" aria-selected="true" data-target="general" id="nav-general" data-i18n="settings.tabGeneral">General</button>
+      <button type="button" class="settings-nav-item" role="tab" aria-selected="false" data-target="action-scripts" id="nav-action-scripts" data-i18n="settings.tabActionScripts">Action Scripts</button>
+      <button type="button" class="settings-nav-item" role="tab" aria-selected="false" data-target="device-performance" id="nav-device-performance" data-i18n="settings.tabDevicePerformance">Device Performance</button>
+      <button type="button" class="settings-nav-item" role="tab" aria-selected="false" data-target="timing" id="nav-timing" data-i18n="settings.tabTiming">Timing &amp; Network</button>
+      <button type="button" class="settings-nav-item" role="tab" aria-selected="false" data-target="network-inspector" id="nav-network-inspector" data-i18n="settings.tabNetworkInspector">Network Inspector</button>
+      <button type="button" class="settings-nav-item" role="tab" aria-selected="false" data-target="sideload-relay" id="nav-sideload-relay" data-i18n="settings.tabSideloadRelay">Sideload Relay</button>
+      <button type="button" class="settings-nav-item" role="tab" aria-selected="false" data-target="mcp-server" id="nav-mcp-server" data-i18n="settings.tabMcpServer">MCP Server</button>
+    </nav>
+    <div class="settings-content">
+      <div class="settings-panel active" data-section="general" id="panel-general" role="tabpanel" aria-labelledby="nav-general" aria-hidden="false">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <div class="settings-section">
+              <div class="settings-row-input">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.language">Language</strong>
+                  <span class="settings-row-desc" data-i18n="settings.languageDesc">Display language for the app interface.</span>
+                </div>
+                <select id="optLanguage" class="settings-select" aria-label="Display language" data-i18n-aria-label="settings.languageAria"></select>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.developerMode">Developer Mode</strong>
+                  <span class="settings-row-desc" data-i18n="settings.developerModeDesc">Extra logging in the main window (same as File → Developer Mode).</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optDevMode">
+                  <input type="checkbox" id="optDevMode" class="settings-toggle-input" role="switch" aria-label="Developer mode" aria-checked="false" data-i18n-aria-label="settings.developerModeAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.privacyMode">Privacy Mode</strong>
+                  <span class="settings-row-desc" data-i18n="settings.privacyModeDesc">Mask IPs and Serial-Numbers in the UI (same as File → Privacy Mode).</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optPrivacy">
+                  <input type="checkbox" id="optPrivacy" class="settings-toggle-input" role="switch" aria-label="Privacy mode" aria-checked="false" data-i18n-aria-label="settings.privacyModeAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.debugLogging">Debug Logging to File</strong>
+                  <span class="settings-row-desc" id="logPathHint" data-i18n="settings.debugLogHint">Writes to the log file under app user data when enabled.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optDebugLog">
+                  <input type="checkbox" id="optDebugLog" class="settings-toggle-input" role="switch" aria-label="Debug logging to file" aria-checked="false" data-i18n-aria-label="settings.debugLoggingAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle" id="keyboardRemoteSettingsRow">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.useKeyboardRemote">Use Keyboard for Roku Remote</strong>
+                  <span class="settings-row-desc" data-i18n="settings.useKeyboardRemoteDesc">When On, you can use the keyboard to control the Roku. Keyboard shortcuts are listed in the Remote Help modal.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optKeyboardRemote">
+                  <input type="checkbox" id="optKeyboardRemote" class="settings-toggle-input" role="switch" aria-label="Roku Remote - Use Keyboard " aria-checked="false" data-i18n-aria-label="settings.useKeyboardRemoteAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle" id="tryDemoAppSettingsRow">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.tryDemoAppToggle">Show Try Demo App Button</strong>
+                  <span class="settings-row-desc" data-i18n="settings.tryDemoAppToggleDesc">When On, a Try Demo App button appears in the title bar for sideloading the bundled Roku Engineer Studio Showcase demo channel to a device.</span>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" id="tryDemoAppOpenBtn" data-i18n="settings.tryDemoAppOpenBtn" data-i18n-aria-label="settings.tryDemoAppOpenBtnAria" aria-label="Open the Try Demo App picker" hidden>Open Demo App</button>
+                <label class="settings-toggle-wrap" for="optTryDemoApp">
+                  <input type="checkbox" id="optTryDemoApp" class="settings-toggle-input" role="switch" aria-label="Show Try Demo App button" aria-checked="true" data-i18n-aria-label="settings.tryDemoAppToggleAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.crashReportingToggle">Show Crash Reports</strong>
+                  <span class="settings-row-desc" data-i18n="settings.crashReportingToggleDesc">When On, an uncaught error shows a report modal with details you can file as a GitHub issue.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optCrashReporting">
+                  <input type="checkbox" id="optCrashReporting" class="settings-toggle-input" role="switch" aria-label="Show crash reports" aria-checked="true" data-i18n-aria-label="settings.crashReportingToggleAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.autoConnect">Auto Connect to Devices</strong>
+                  <span class="settings-row-desc" data-i18n="settings.autoConnectDesc">When On, the app will automatically connect to devices that were stayed connected when closing the app in the previous session.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optAutoConnectLast">
+                  <input type="checkbox" id="optAutoConnectLast" class="settings-toggle-input" role="switch" aria-label="Auto Connect to Devices" aria-checked="false" data-i18n-aria-label="settings.autoConnect" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.autoHideSidebar">Auto-Hide Sidebar</strong>
+                  <span class="settings-row-desc" data-i18n="settings.autoHideSidebarDesc">When On, the Sidebar, which presents the devices list, will auto-toggle if the Sidebar was hidden in the previous session.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optRememberSidebarToggle">
+                  <input type="checkbox" id="optRememberSidebarToggle" class="settings-toggle-input" role="switch" aria-label="Auto-Hide Sidebar" aria-checked="false" data-i18n-aria-label="settings.autoHideSidebar" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.encryptPasswords">Encrypt Saved Passwords with System Keychain</strong>
+                  <span class="settings-row-desc" data-i18n="settings.encryptPasswordsDesc">Encrypt each device's remembered password via the OS keychain. When Off, it persists but is stored unencrypted on disk.</span>
+                  <span class="settings-row-desc settings-keychain-status" id="keychainStorageStatus" aria-live="polite"></span>
+                </div>
+                <label class="settings-toggle-wrap" for="optRememberPasswordsInKeychain">
+                  <input type="checkbox" id="optRememberPasswordsInKeychain" class="settings-toggle-input" role="switch" aria-label="Persist saved passwords in system keychain" aria-checked="false" data-i18n-aria-label="settings.encryptPasswordsAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div id="generalTimingRows" class="general-timing-rows"></div>
+            </div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetGeneral" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusGeneral" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveGeneral" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-panel" data-section="action-scripts" id="panel-action-scripts" role="tabpanel" aria-labelledby="nav-action-scripts" aria-hidden="true">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <div class="settings-section folder-scripts-block" id="actionScriptsDefaultFolderSettingsRow">
+              <p class="help-blurb" data-i18n="settings.actionScriptsBlurb">Default folder for screenshots and logs when a script needs saves. You can still pick another folder per run.</p>
+              <div class="folder-action-row">
+                <div class="folder-integrated">
+                  <div id="folderDisplay" class="folder-integrated-path empty" data-i18n="settings.noFolderSet">No folder set</div>
+                  <button type="button" class="folder-integrated-btn" id="btnBrowseFolder" data-i18n="settings.chooseFolder">Choose Folder…</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetActionScripts" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusActionScripts" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveActionScripts" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-panel" data-section="device-performance" id="panel-device-performance" role="tabpanel" aria-labelledby="nav-device-performance" aria-hidden="true">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <p class="help-blurb" data-i18n-html="settings.devicePerfIntroHtml">Applies while <strong>Device Performance</strong> is showing, the Roku has Developer Mode, and the Dev App is in the foreground. When <strong>Remember Device Performance</strong> is on below, the Remote Section restores the quad layout per device.</p>
+            <div class="settings-section device-perf-unified-list">
+              <div class="settings-row-toggle">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.rememberDevicePerf">Remember Device Performance</strong>
+                  <span class="settings-row-desc" data-i18n-html="settings.rememberDevicePerfDescHtml">Restore whether <strong>Device Performance</strong> was showing for each device. Turn off to always start with just the Remote Section until you show it again.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optDevicePerfRememberQuad">
+                  <input type="checkbox" id="optDevicePerfRememberQuad" class="settings-toggle-input" role="switch" aria-label="Remember whether Device Performance is showing, per device" aria-checked="false" data-i18n-aria-label="settings.rememberDevicePerfAria" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div id="devicePerfRows" class="device-perf-timing-rows"></div>
+            </div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetDevicePerf" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusDevicePerf" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveDevicePerf" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-panel" data-section="timing" id="panel-timing" role="tabpanel" aria-labelledby="nav-timing" aria-hidden="true">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <div class="settings-section">
+              <div id="timingRows"></div>
+            </div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetTiming" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusTiming" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveTiming" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-panel" data-section="mcp-server" id="panel-mcp-server" role="tabpanel" aria-labelledby="nav-mcp-server" aria-hidden="true">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <div class="mcp-server-topbar">
+              <p class="help-blurb mcp-server-blurb" data-i18n-html="settings.mcpServerBlurbHtml">Expose Roku Engineer Studio to AI agents via the <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer" class="mcp-link">Model Context Protocol</a>. Toggle a client to add or remove its <code class="mcp-inline-code">roku-engineer-studio</code> MCP server entry; other entries are left untouched.</p>
+              <div class="mcp-server-topbar-action">
+                <button type="button" class="btn btn-secondary btn-sm" id="btnViewMcpTools" data-i18n="settings.mcpToolsButton">View MCP Tools</button>
+              </div>
+            </div>
+            <div class="settings-section">
+              <div id="mcpClientsList" class="mcp-clients-list" aria-live="polite"></div>
+            </div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetMcpServer" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusMcpServer" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveMcpServer" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-panel" data-section="network-inspector" id="panel-network-inspector" role="tabpanel" aria-labelledby="nav-network-inspector" aria-hidden="true">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <div class="ni-place-bar" id="niPlaceRow" hidden>
+              <label class="ni-place-bar-label" for="niPlace" data-i18n="settings.location">Location</label>
+              <select id="niPlace" class="ni-place-select" aria-label="Network Inspector location" data-i18n-aria-label="settings.niPlaceAria"></select>
+            </div>
+            <span class="settings-status-line ni-place-hint" id="niPlaceHint" aria-live="polite" hidden></span>
+            <div class="ni-port-conflict-warn" id="niPortConflictWarn" role="alert" hidden>
+              <span class="ni-port-conflict-warn-icon" aria-hidden="true">!</span>
+              <div class="ni-port-conflict-warn-body">
+                  <strong id="niPortConflictTitle" data-i18n="settings.niPortConflictTitle">Proxy Port Unavailable</strong>
+                <span class="ni-port-conflict-warn-msg" id="niPortConflictMsg"></span>
+                <ul class="ni-port-conflict-steps" id="niPortConflictSteps"></ul>
+              </div>
+            </div>
+            <div class="settings-section" id="niSection">
+              <div class="settings-row-toggle" id="networkInspectorEnableSettingsRow">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.enableNetworkInspector">Enable Network Inspector</strong>
+                  <span class="settings-row-desc" data-i18n="settings.enableNetworkInspectorDesc">Inspect a device's network traffic. Decrypts your dev channel's HTTPS via the local proxy (any network); a hotspot also captures DNS/SNI. Stored locally only.</span>
+                </div>
+                <label class="settings-toggle-wrap" for="optNetworkInspector">
+                  <input type="checkbox" id="optNetworkInspector" class="settings-toggle-input" role="switch" aria-label="Enable Network Inspector" aria-checked="false" data-i18n-aria-label="settings.enableNetworkInspector" />
+                  <span class="settings-toggle-ui" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="settings-row-input" id="mitmProxyPortSettingsRow">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.mitmProxyPort">MITM Proxy Port</strong>
+                  <span class="settings-row-desc" data-i18n="settings.mitmProxyPortDesc">Port the local decrypting proxy listens on. Route your sideloaded dev channel through it — stock channels can't be intercepted.</span>
+                </div>
+                <div class="settings-num-stack">
+                  <span class="bound-label" data-ni-bound-min></span>
+                  <input type="number" id="niMitmPort" class="settings-text-input" min="1" max="65535" value="8888" aria-label="MITM proxy port" data-i18n-aria-label="settings.mitmProxyPortAria" />
+                  <span class="bound-label" data-ni-bound-max></span>
+                </div>
+              </div>
+              <div class="settings-row-input">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.packetLimit">Per-Device Packet Limit</strong>
+                  <span class="settings-row-desc" data-i18n="settings.packetLimitDesc">Frames kept per device for the PCAP export. Higher = more history and memory.</span>
+                </div>
+                <div class="settings-num-stack">
+                  <span class="bound-label" data-ni-bound-min></span>
+                  <input type="number" id="niMaxRawPackets" class="settings-text-input" min="100" max="100000" step="100" value="5000" aria-label="Per-device packet limit" data-i18n-aria-label="settings.packetLimitAria" />
+                  <span class="bound-label" data-ni-bound-max></span>
+                </div>
+              </div>
+              <div class="settings-row-input">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.maxBodySize">Max Body Size (KB)</strong>
+                  <span class="settings-row-desc" data-i18n="settings.maxBodySizeDesc">How much of each request/response body is kept for viewing. Over the limit, a "Body Truncated" badge shows (the device is unaffected). Applies to new traffic only.</span>
+                </div>
+                <div class="settings-num-stack">
+                  <span class="bound-label" data-ni-bound-min></span>
+                  <input type="number" id="niMaxBodyKb" class="settings-text-input" min="64" max="16384" step="64" value="4096" aria-label="Max retained body size in KB" data-i18n-aria-label="settings.maxBodySizeAria" />
+                  <span class="bound-label" data-ni-bound-max></span>
+                </div>
+              </div>
+              <div class="settings-row-input" id="niSetupRow">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.hotspotCaptureSetup">Hotspot &amp; Capture Setup <span class="ni-attention-badge" id="niSetupBadge" hidden data-i18n="settings.setupNeeded">Setup Needed</span></strong>
+                  <span class="settings-row-desc" id="niSetupRowDesc" data-i18n="settings.niSetupRowDescOk">Optional — only for hotspot DNS/SNI capture. Proxying needs no setup.</span>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" id="btnOpenNiSetup" data-i18n="settings.viewSetup">View Setup</button>
+              </div>
+              <div class="settings-row-input" id="niCaRow">
+                <div class="settings-row-text">
+                  <strong data-i18n="settings.caSectionTitle">Certificate Authority</strong>
+                  <span class="settings-row-desc" id="niCaRowDesc" data-i18n="settings.caRowDesc">The local certificate authority the proxy uses to decrypt HTTPS.</span>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" id="btnOpenNiCa" data-i18n="settings.caViewCert">View Certificate</button>
+              </div>
+            </div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetNetworkInspector" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusNetworkInspector" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveNetworkInspector" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-panel" data-section="sideload-relay" id="panel-sideload-relay" role="tabpanel" aria-labelledby="nav-sideload-relay" aria-hidden="true">
+        <div class="settings-panel-fill">
+          <div class="settings-panel-scroll">
+            <ul class="help-blurb sr-intro">
+              <li data-i18n-html="settings.srIntro1Html">Point your sideload tool (VS Code with the BrightScript extension, Eclipse, or the roku-deploy CLI)<span id="srRelayUrlWrap" hidden> — or a browser at <code id="srRelayUrl">http://…/</code></span> — here instead of a single Roku.</li>
+              <li data-i18n="settings.srIntro2">RDS accepts the sideload once, then installs it on every enabled target, launches the Dev App, and opens each console.</li>
+              <li data-i18n="settings.srIntro3">Sideloads from this machine proceed automatically.</li>
+              <li data-i18n="settings.srIntro4">A sideload from another LAN device needs the Dev Password and asks you to allow it.</li>
+            </ul>
+            <div id="sideloadRelayRoot" class="settings-section"></div>
+          </div>
+          <div class="section-save-dock">
+            <button type="button" class="btn-timing-reset" id="btnResetSideloadRelay" data-i18n="settings.resetToDefaults">Reset to Defaults</button>
+            <span class="section-save-status" id="saveStatusSideloadRelay" aria-live="polite"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveSideloadRelay" data-i18n="common.save">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+  <div class="ni-modal-overlay" id="niSetupModal" hidden>
+    <div class="ni-modal" role="dialog" aria-modal="true" aria-labelledby="niSetupModalTitle">
+      <div class="ni-modal-header">
+        <div class="ni-modal-title-wrap">
+          <h2 id="niSetupModalTitle" data-i18n="settings.hotspotCaptureSetupModalTitle">Hotspot Capture Setup</h2>
+          <span class="ni-setup-header-badge" id="niSetupHeaderBadge" data-state="unknown" hidden></span>
+        </div>
+        <button type="button" class="modal-close" id="niSetupModalClose" title="Close" aria-label="Close" data-i18n-title="common.close" data-i18n-aria-label="common.close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="ni-modal-body" id="niSetupModalBody"></div>
+    </div>
+  </div>
+  <div class="ni-modal-overlay" id="niCaModal" hidden>
+    <div class="ni-modal" role="dialog" aria-modal="true" aria-labelledby="niCaModalTitle">
+      <div class="ni-modal-header">
+        <div class="ni-modal-title-wrap">
+          <h2 id="niCaModalTitle" data-i18n="settings.caSectionTitle">Certificate Authority</h2>
+        </div>
+        <button type="button" class="modal-close" id="niCaModalClose" title="Close" aria-label="Close" data-i18n-title="common.close" data-i18n-aria-label="common.close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="ni-modal-body">
+        <p class="settings-row-desc" id="niCaSectionDesc" data-i18n="settings.caSectionDesc">The Network Inspector signs decrypted HTTPS with a local certificate authority. Trust or import it on the device so your dev channel accepts the proxy. The private key never leaves this machine.</p>
+        <table class="ni-ca-table" id="niCaInfo" hidden>
+          <tbody>
+            <tr>
+              <th scope="row" class="ni-ca-label" data-i18n="settings.caSubject">Subject</th>
+              <td class="ni-ca-value" id="niCaSubject"></td>
+            </tr>
+            <tr>
+              <th scope="row" class="ni-ca-label" data-i18n="settings.caFingerprint">SHA-256 Fingerprint</th>
+              <td class="ni-ca-value ni-ca-mono" id="niCaFingerprint"></td>
+            </tr>
+            <tr>
+              <th scope="row" class="ni-ca-label" data-i18n="settings.caValidity">Validity</th>
+              <td class="ni-ca-value" id="niCaValidity"></td>
+            </tr>
+            <tr>
+              <th scope="row" class="ni-ca-label" data-i18n="settings.caProxyAddress">Proxy Address</th>
+              <td class="ni-ca-value info-value" id="niCaProxy" data-privacy="mask"></td>
+            </tr>
+          </tbody>
+        </table>
+        <span class="settings-row-desc" id="niCaEmpty" data-i18n="settings.caLoading">Loading certificate details…</span>
+      </div>
+      <div class="ni-modal-footer">
+        <span class="settings-row-desc" id="niCaExportStatus" aria-live="polite"></span>
+        <div class="ni-modal-footer-actions">
+          <button type="button" class="btn btn-secondary btn-sm ni-ca-export" id="btnExportCaPem" title="Export .pem" aria-label="Export .pem" data-i18n-title="settings.exportCaPem" data-i18n-aria-label="settings.exportCaPem"><span data-i18n="settings.caExportAction">Export</span><span class="ni-ca-ext">.pem</span></button>
+          <button type="button" class="btn btn-secondary btn-sm ni-ca-export" id="btnExportCaCrt" title="Export .crt" aria-label="Export .crt" data-i18n-title="settings.exportCaCrt" data-i18n-aria-label="settings.exportCaCrt"><span data-i18n="settings.caExportAction">Export</span><span class="ni-ca-ext">.crt</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./dist/components/settings/settings.js"></script>
+</body>
+</html>

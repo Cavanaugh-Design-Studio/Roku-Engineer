@@ -1,0 +1,4105 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Roku Remote Server API",
+    "description": "REST API for controlling Roku devices remotely via the Roku Engineer Studio remote server. This server runs on a machine at a remote location and exposes Roku ECP (External Control Protocol) functionality over HTTP, along with telnet debug console and telnet system console streaming, a remote Network Inspector (MITM capture/replay/traffic rules), and a remote BrightScript socket debugger, both of which also stream live events over Server-Sent Events (SSE).",
+    "version": "1.1.0",
+    "contact": {
+      "name": "Roku Engineer Studio"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "http://localhost:4951",
+      "description": "Local development server"
+    },
+    {
+      "url": "http://{host}:{port}",
+      "description": "Custom server",
+      "variables": {
+        "host": {
+          "default": "localhost",
+          "description": "Server hostname or IP"
+        },
+        "port": {
+          "default": "4951",
+          "description": "Server port"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "Documentation",
+      "description": "Swagger UI and this OpenAPI spec"
+    },
+    {
+      "name": "Health",
+      "description": "Server health and status endpoints"
+    },
+    {
+      "name": "Capabilities",
+      "description": "Server capabilities and feature discovery"
+    },
+    {
+      "name": "Discovery",
+      "description": "Roku device discovery endpoints"
+    },
+    {
+      "name": "Device Info",
+      "description": "Get information about Roku devices"
+    },
+    {
+      "name": "Remote Control",
+      "description": "Send remote control commands to Roku devices"
+    },
+    {
+      "name": "Apps",
+      "description": "Launch and manage apps on Roku devices"
+    },
+    {
+      "name": "Query",
+      "description": "Query Roku ECP endpoints"
+    },
+    {
+      "name": "Developer",
+      "description": "Developer mode features (sideload, screenshot, etc.)"
+    },
+    {
+      "name": "RALE",
+      "description": "RALE/TrackerTask connection for App Connector"
+    },
+    {
+      "name": "Console",
+      "description": "BrightScript debug console (telnet port 8085) streaming"
+    },
+    {
+      "name": "Telnet System",
+      "description": "System console command relay over telnet port 8080 (SceneGraph console) or 8087 (screensaver console), selected per request with ?port= - separate from the BrightScript debug console (port 8085)"
+    },
+    {
+      "name": "Network Inspector",
+      "description": "Remote MITM proxy capture: config, live events, replay, traffic rules, PCAP/CA export, and the SSE event stream"
+    },
+    {
+      "name": "BrightScript Debugger",
+      "description": "Socket debug protocol (control port 8081): attach/detach, execution control, breakpoints, variables, and the SSE event stream"
+    }
+  ],
+  "paths": {
+    "/api-docs": {
+      "get": {
+        "tags": ["Documentation"],
+        "summary": "Swagger UI",
+        "description": "Interactive HTML documentation for this API (also served at /api-docs/).",
+        "operationId": "getApiDocs",
+        "responses": {
+          "200": {
+            "description": "Swagger UI page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Swagger UI not found (swagger-ui.html missing next to the server)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api-docs/swagger.json": {
+      "get": {
+        "tags": ["Documentation"],
+        "summary": "OpenAPI spec",
+        "description": "This OpenAPI 3.0 document as JSON. servers[0].url is rewritten per request from the Host (and X-Forwarded-Proto) headers so Try-it-out targets the server you loaded it from.",
+        "operationId": "getSwaggerJson",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0 specification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Swagger spec not found (swagger.json missing next to the server)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Health check",
+        "description": "Check server health and get basic status information",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "success": true,
+                  "status": "ok",
+                  "apiVersion": "1.2.0",
+                  "serverVersion": "1.1.0",
+                  "hostname": "mac-mini.local",
+                  "platform": "darwin",
+                  "uptime": 3600.5,
+                  "deviceCount": 3
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "tags": ["Capabilities"],
+        "summary": "Get server capabilities",
+        "description": "Get the list of features/capabilities supported by this remote server. Use this to determine which tabs/features to show in the client application.",
+        "operationId": "getCapabilities",
+        "responses": {
+          "200": {
+            "description": "Server capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                },
+                "example": {
+                  "success": true,
+                  "version": "1.2.0",
+                  "serverVersion": "1.1.0",
+                  "capabilities": {
+                    "remote": true,
+                    "apps": true,
+                    "query": true,
+                    "devApp": true,
+                    "screenshot": true,
+                    "verifyDevAuth": true,
+                    "console": true,
+                    "telnetSystemPorts": [8080, 8087],
+                    "debugger": true,
+                    "appConnector": true,
+                    "deepLink": true,
+                    "networkInspector": {
+                      "supported": true,
+                      "requiresRoot": true,
+                      "isRoot": true,
+                      "mitmPort": 8888,
+                      "enabled": true,
+                      "mitmEnabled": true,
+                      "mitmActive": true
+                    }
+                  },
+                  "serverInfo": {
+                    "hostname": "mac-mini.local",
+                    "platform": "darwin",
+                    "nodeVersion": "v24.17.0"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/devices": {
+      "get": {
+        "tags": ["Discovery"],
+        "summary": "Discover Roku devices",
+        "description": "Scan the local network for Roku devices using SSDP and subnet scanning. This performs a full discovery which may take several seconds.",
+        "operationId": "discoverDevices",
+        "responses": {
+          "200": {
+            "description": "Discovery completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/devices/cached": {
+      "get": {
+        "tags": ["Discovery"],
+        "summary": "Get cached devices",
+        "description": "Get the list of previously discovered Roku devices from cache. This is faster than a full discovery.",
+        "operationId": "getCachedDevices",
+        "responses": {
+          "200": {
+            "description": "Cached device list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/info": {
+      "get": {
+        "tags": ["Device Info"],
+        "summary": "Get device info",
+        "description": "Get detailed information about a specific Roku device",
+        "operationId": "getDeviceInfo",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfoResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to get device info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/keypress/{key}": {
+      "post": {
+        "tags": ["Remote Control"],
+        "summary": "Send key press",
+        "description": "Send a remote control key press to the Roku device",
+        "operationId": "sendKeypress",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "description": "The key to press",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Home", "Rev", "Fwd", "Play", "Select", "Left", "Right", "Down", "Up",
+                "Back", "InstantReplay", "Info", "Backspace", "Search", "Enter",
+                "VolumeDown", "VolumeMute", "VolumeUp", "PowerOff", "Power",
+                "ChannelUp", "ChannelDown", "InputTuner", "InputHDMI1", "InputHDMI2",
+                "InputHDMI3", "InputHDMI4", "InputAV1"
+              ]
+            },
+            "examples": {
+              "home": { "value": "Home", "summary": "Go to home screen" },
+              "select": { "value": "Select", "summary": "Select/OK button" },
+              "play": { "value": "Play", "summary": "Play/Pause" },
+              "up": { "value": "Up", "summary": "Navigate up" }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key press sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/launch/{appId}": {
+      "post": {
+        "tags": ["Apps"],
+        "summary": "Launch an app",
+        "description": "Launch an app on the Roku device by its ID",
+        "operationId": "launchApp",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "name": "appId",
+            "in": "path",
+            "required": true,
+            "description": "The app ID to launch",
+            "schema": {
+              "type": "string"
+            },
+            "examples": {
+              "netflix": { "value": "12", "summary": "Netflix" },
+              "youtube": { "value": "837", "summary": "YouTube" },
+              "dev": { "value": "dev", "summary": "Sideloaded dev channel" }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "App launched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/query/device-info": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "Query device info (XML)",
+        "description": "Get raw device info XML from the Roku ECP endpoint",
+        "operationId": "queryDeviceInfo",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device info XML",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/query/apps": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "Query installed apps",
+        "description": "Get list of installed apps on the Roku device",
+        "operationId": "queryApps",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Apps list XML",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/query/active-app": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "Query active app",
+        "description": "Get the currently active app on the Roku device",
+        "operationId": "queryActiveApp",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active app XML",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/query/media-player": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "Query media player",
+        "description": "Get media player state and playback information",
+        "operationId": "queryMediaPlayer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media player XML",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/query/sgnodes/all": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "Query all SceneGraph nodes",
+        "description": "Get all SceneGraph nodes (developer feature)",
+        "operationId": "querySgNodesAll",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SceneGraph nodes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/query/chanperf": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "Query channel performance",
+        "description": "Get channel performance metrics (developer feature)",
+        "operationId": "queryChanperf",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channel performance data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/post/sgrendezvous/track": {
+      "post": {
+        "tags": ["Query"],
+        "summary": "Enable SG Rendezvous tracking",
+        "description": "Enable SceneGraph Rendezvous tracking for debugging",
+        "operationId": "sgRendezvousTrack",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tracking enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/post/sgrendezvous/untrack": {
+      "post": {
+        "tags": ["Query"],
+        "summary": "Disable SG Rendezvous tracking",
+        "description": "Disable SceneGraph Rendezvous tracking",
+        "operationId": "sgRendezvousUntrack",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tracking disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/input-text": {
+      "post": {
+        "tags": ["Remote Control"],
+        "summary": "Send text input",
+        "description": "Send a string of text to the Roku device (one character at a time)",
+        "operationId": "inputText",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Text to send to the device"
+                  }
+                }
+              },
+              "example": {
+                "text": "Hello World"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Text sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/deeplink": {
+      "post": {
+        "tags": ["Apps"],
+        "summary": "Deep-Link to content",
+        "description": "Launch an app with Deep-Link parameters to specific content",
+        "operationId": "deeplink",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["appId"],
+                "properties": {
+                  "appId": {
+                    "type": "string",
+                    "description": "The app ID to launch"
+                  },
+                  "contentId": {
+                    "type": "string",
+                    "description": "Content ID to Deep-Link to"
+                  },
+                  "mediaType": {
+                    "type": "string",
+                    "enum": ["movie", "series", "episode", "live"],
+                    "description": "Type of media content"
+                  }
+                }
+              },
+              "example": {
+                "appId": "12",
+                "contentId": "70143836",
+                "mediaType": "movie"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deep-Link launched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/icon/{appId}": {
+      "get": {
+        "tags": ["Apps"],
+        "summary": "Get app icon",
+        "description": "Get the icon for an installed app as a base64 data URL",
+        "operationId": "getAppIcon",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "name": "appId",
+            "in": "path",
+            "required": true,
+            "description": "The app ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "App icon",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "dataUrl": {
+                      "type": "string",
+                      "description": "Base64 encoded data URL of the icon"
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "dataUrl": "data:image/png;base64,iVBORw0KGgo..."
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/sideload": {
+      "post": {
+        "tags": ["Developer"],
+        "summary": "Sideload a channel",
+        "description": "Install a development channel package (.zip or .pkg) on the Roku device. multipart/form-data only - the uploaded bytes are forwarded straight to the device; a JSON body is rejected with 400 'Missing file or password'.",
+        "operationId": "sideload",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file", "password"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The .zip or .pkg channel package file to install"
+                  },
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "description": "Roku developer password"
+                  },
+                  "remotedebug": {
+                    "type": "string",
+                    "enum": ["0", "1", "true"],
+                    "description": "When '1' or 'true', forces a clean Delete+Install with remotedebug=1 so the channel relaunches with debugging enabled (a plain Replace can drop the flag)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sideload result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/delete-sideload": {
+      "post": {
+        "tags": ["Developer"],
+        "summary": "Delete sideloaded channel",
+        "description": "Remove the sideloaded development channel from the Roku device",
+        "operationId": "deleteSideload",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["password"],
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "description": "Roku developer password"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Delete result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/screenshot": {
+      "post": {
+        "tags": ["Developer"],
+        "summary": "Take screenshot",
+        "description": "Capture a screenshot from the Roku device (requires sideloaded channel to be running)",
+        "operationId": "screenshot",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["password"],
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "description": "Roku developer password"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Screenshot captured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "Base64 data URL of the screenshot"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/rale/wake": {
+      "post": {
+        "tags": ["RALE"],
+        "summary": "Wake TrackerTask",
+        "description": "Send ECP input to wake up the TrackerTask in the sideloaded channel",
+        "operationId": "raleWake",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "port": {
+                    "type": "integer",
+                    "default": 49200,
+                    "description": "TrackerTask port"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Wake command sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/rale/connect": {
+      "post": {
+        "tags": ["RALE"],
+        "summary": "Connect to TrackerTask",
+        "description": "Establish a TCP socket connection to the TrackerTask",
+        "operationId": "raleConnect",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "port": {
+                    "type": "integer",
+                    "default": 49200,
+                    "description": "TrackerTask port"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Connection established",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "connectionId": {
+                      "type": "string",
+                      "description": "Connection ID for subsequent commands"
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "connectionId": "192.168.1.100:49200"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/rale/command": {
+      "post": {
+        "tags": ["RALE"],
+        "summary": "Send RALE command",
+        "description": "Send a command to the TrackerTask and get the response",
+        "operationId": "raleCommand",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["connectionId", "command"],
+                "properties": {
+                  "connectionId": {
+                    "type": "string",
+                    "description": "Connection ID from raleConnect"
+                  },
+                  "command": {
+                    "type": "string",
+                    "description": "Command name to execute",
+                    "enum": ["init", "getExternalControlFunctions", "executeExternalControlFunction"]
+                  },
+                  "args": {
+                    "type": "object",
+                    "description": "Command arguments"
+                  }
+                }
+              },
+              "examples": {
+                "init": {
+                  "value": {
+                    "connectionId": "192.168.1.100:49200",
+                    "command": "init",
+                    "args": {}
+                  }
+                },
+                "getFunctions": {
+                  "value": {
+                    "connectionId": "192.168.1.100:49200",
+                    "command": "getExternalControlFunctions",
+                    "args": {}
+                  }
+                },
+                "executeFunction": {
+                  "value": {
+                    "connectionId": "192.168.1.100:49200",
+                    "command": "executeExternalControlFunction",
+                    "args": {
+                      "functionName": "PlayContent",
+                      "functionParams": ["content123", true]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "description": "Response data from the TrackerTask"
+                    },
+                    "uuid": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/rale/disconnect": {
+      "post": {
+        "tags": ["RALE"],
+        "summary": "Disconnect from TrackerTask",
+        "description": "Close the TCP connection to the TrackerTask",
+        "operationId": "raleDisconnect",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["connectionId"],
+                "properties": {
+                  "connectionId": {
+                    "type": "string",
+                    "description": "Connection ID to disconnect"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Disconnected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet/connect": {
+      "post": {
+        "tags": ["Console"],
+        "summary": "Connect to BrightScript console",
+        "description": "Establish a telnet connection to port 8085 on the Roku device for BrightScript Debug Output. Returns a session ID to use with WebSocket streaming.",
+        "operationId": "telnetConnect",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Telnet session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelnetConnectResponse"
+                },
+                "example": {
+                  "success": true,
+                  "sessionId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Connection failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet/disconnect": {
+      "post": {
+        "tags": ["Console"],
+        "summary": "Disconnect telnet session",
+        "description": "Close the telnet connection for the specified device",
+        "operationId": "telnetDisconnect",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session disconnected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/telnet/sessions": {
+      "get": {
+        "tags": ["Console"],
+        "summary": "List active telnet sessions",
+        "description": "Get all active telnet debug sessions with their status",
+        "operationId": "telnetSessions",
+        "responses": {
+          "200": {
+            "description": "List of active sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TelnetSession"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "sessions": [
+                    {
+                      "sessionId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                      "deviceIP": "192.168.1.100",
+                      "connectedClients": 1,
+                      "lastActivity": "2024-01-15T10:30:00.000Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/telnet/status/{sessionId}": {
+      "get": {
+        "tags": ["Console"],
+        "summary": "Get telnet session status",
+        "description": "Get the status of a specific telnet session by session ID",
+        "operationId": "telnetStatus",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "description": "Session ID returned from telnet connect",
+            "schema": {
+              "type": "string"
+            },
+            "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "exists": {
+                      "type": "boolean",
+                      "description": "Whether the session exists"
+                    },
+                    "deviceIP": {
+                      "type": "string",
+                      "description": "IP address of the connected device"
+                    },
+                    "connectedClients": {
+                      "type": "integer",
+                      "description": "Number of WebSocket clients streaming logs"
+                    },
+                    "lastActivity": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "Timestamp of last activity"
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "exists": true,
+                  "deviceIP": "192.168.1.100",
+                  "connectedClients": 1,
+                  "lastActivity": "2024-01-15T10:30:00.000Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/telnet/connect": {
+      "post": {
+        "tags": ["Console"],
+        "summary": "Connect to BrightScript console (legacy path)",
+        "description": "Alternate connect route that takes the device IP in the JSON body instead of the URL path. Equivalent to POST /device/{ip}/telnet/connect.",
+        "operationId": "telnetConnectLegacy",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["deviceIP"],
+                "properties": {
+                  "deviceIP": {
+                    "type": "string",
+                    "format": "ipv4"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Telnet session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelnetConnectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid deviceIP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/telnet/disconnect": {
+      "post": {
+        "tags": ["Console"],
+        "summary": "Disconnect telnet session by session ID",
+        "description": "Close a telnet session by its session ID, looked up directly (as opposed to POST /device/{ip}/telnet/disconnect, which looks the session up by device IP).",
+        "operationId": "telnetDisconnectBySession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sessionId"],
+                "properties": {
+                  "sessionId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session disconnected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet/clear-buffer": {
+      "post": {
+        "tags": ["Console"],
+        "summary": "Clear telnet buffer",
+        "description": "Clear the in-memory relay buffer for a device's BrightScript console session without closing the underlying telnet socket.",
+        "operationId": "telnetClearBuffer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Buffer cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid device IP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/telnet/stream/{sessionId}": {
+      "get": {
+        "tags": ["Console"],
+        "summary": "Telnet log WebSocket stream",
+        "description": "WebSocket upgrade (not a plain HTTP response) that streams buffered + live BrightScript console output for a session created via /telnet/connect or /device/{ip}/telnet/connect. Connect with a ws:// (or wss://) client, not a REST call. When ROKU_ENGINEER_RELAY_TOKEN is set the upgrade is gated too; browsers can't set an Authorization header on a WebSocket, so pass ?token=<token> instead.",
+        "operationId": "telnetStreamWebSocket",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+          },
+          {
+            "name": "skipBuffer",
+            "in": "query",
+            "required": false,
+            "description": "Skip replaying the buffered backlog on connect",
+            "schema": {
+              "type": "string",
+              "enum": ["1"]
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols - WebSocket connection established"
+          },
+          "404": {
+            "description": "No session with this ID (plain HTTP 404, not an upgrade)"
+          },
+          "401": {
+            "description": "Unauthorized (plain HTTP 401, not an upgrade) - ROKU_ENGINEER_RELAY_TOKEN is set and no valid Bearer/?token= was supplied"
+          }
+        }
+      }
+    },
+    "/device/{ip}/hardware-image": {
+      "get": {
+        "tags": ["Developer"],
+        "summary": "Get device hardware image",
+        "description": "Fetch the Roku's UPnP device-image (icon list) directly from the device - the physical remote/box artwork, not an installed app's icon.",
+        "operationId": "getHardwareImage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hardware image bytes",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Image fetch failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/verify-dev-auth": {
+      "post": {
+        "tags": ["Developer"],
+        "summary": "Verify developer password",
+        "description": "Check Developer Mode digest auth (port 80) without capturing a screenshot - used to validate a password before an action that needs one.",
+        "operationId": "verifyDevAuth",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["password"],
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "description": "Roku developer password"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verification result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet-system/connect": {
+      "post": {
+        "tags": ["Telnet System"],
+        "summary": "Connect to system console",
+        "description": "Open a telnet connection to the Roku system console on port 8080, or 8087 (screensaver console) via ?port= - distinct from the BrightScript debug console on 8085. Replaces any existing connection for the same ip:port.",
+        "operationId": "telnetSystemConnect",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "$ref": "#/components/parameters/TelnetSystemPort"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet-system/disconnect": {
+      "post": {
+        "tags": ["Telnet System"],
+        "summary": "Disconnect from system console",
+        "description": "Close this device's system console connection on port 8080, or 8087 (screensaver console) via ?port=.",
+        "operationId": "telnetSystemDisconnect",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "$ref": "#/components/parameters/TelnetSystemPort"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Disconnected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet-system/send": {
+      "post": {
+        "tags": ["Telnet System"],
+        "summary": "Send a system console command",
+        "description": "Send a command string to the system console on port 8080, or 8087 (screensaver console) via ?port=. Returns { success: false, error: 'Not connected' } when no socket is open for that ip:port.",
+        "operationId": "telnetSystemSend",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "$ref": "#/components/parameters/TelnetSystemPort"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                  "command": {
+                    "type": "string"
+                  }
+                }
+              },
+              "example": {
+                "command": "chanperf"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing command parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet-system/status": {
+      "get": {
+        "tags": ["Telnet System"],
+        "summary": "Get system console connection status",
+        "description": "Check whether this device currently has an open system console connection on port 8080, or 8087 (screensaver console) via ?port=. Returns { connected, lastActivity }.",
+        "operationId": "telnetSystemStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "$ref": "#/components/parameters/TelnetSystemPort"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/telnet-system/data": {
+      "get": {
+        "tags": ["Telnet System"],
+        "summary": "Get buffered system console data",
+        "description": "Poll for buffered output from the system console on port 8080, or 8087 (screensaver console) via ?port=, since the last call; the buffer is drained (cleared) on read. There is no WebSocket/SSE for these consoles - poll this route.",
+        "operationId": "telnetSystemData",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          },
+          {
+            "$ref": "#/components/parameters/TelnetSystemPort"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Buffered data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "string",
+                      "description": "Buffered console text since the last poll"
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "data": ""
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/status": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Get Network Inspector engine status",
+        "description": "Live capture/MITM engine status - readiness, connected devices, MITM state, and buffered event count. Same object also broadcast over GET /network/stream.",
+        "operationId": "getNetworkStatus",
+        "responses": {
+          "200": {
+            "description": "Engine status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/NetworkInspectorStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/config": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Get Network Inspector config",
+        "description": "Get the persisted remote Network Inspector configuration for this server (survives restarts) plus the current live status.",
+        "operationId": "getNetworkConfig",
+        "responses": {
+          "200": {
+            "description": "Config + status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "config": {
+                      "$ref": "#/components/schemas/NetworkInspectorConfig"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/NetworkInspectorStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Network Inspector"],
+        "summary": "Update Network Inspector config",
+        "description": "Merge and persist Network Inspector config (enabled, MITM on/off, MITM port, max raw packets per device), then apply it immediately. POST is equivalent.",
+        "operationId": "setNetworkConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NetworkInspectorConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated config + status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "config": {
+                      "$ref": "#/components/schemas/NetworkInspectorConfig"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/NetworkInspectorStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Update Network Inspector config (alias of PUT)",
+        "description": "Identical to PUT /network/config.",
+        "operationId": "setNetworkConfigPost",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NetworkInspectorConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated config + status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "config": {
+                      "$ref": "#/components/schemas/NetworkInspectorConfig"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/NetworkInspectorStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/events": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Get buffered events for a device",
+        "description": "Get the most recent captured network events (summaries - fetch a single event's full headers/body via GET /network/event/{eventId}) for one device.",
+        "operationId": "getNetworkEvents",
+        "parameters": [
+          {
+            "name": "deviceIp",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "ipv4"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Max events to return (default 500)",
+            "schema": {
+              "type": "integer",
+              "default": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/NetworkEvent"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing deviceIp query param",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/event/{eventId}": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Get full event detail",
+        "description": "Get the full detail (complete headers/body, not just the list summary) for one captured event.",
+        "operationId": "getNetworkEventDetail",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "event": {
+                      "$ref": "#/components/schemas/NetworkEvent"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/event/{eventId}/note": {
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Set an event annotation",
+        "description": "Attach a session-scoped free-text note to a captured event (not persisted across a server restart).",
+        "operationId": "setNetworkEventNote",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Truncated to 4000 characters"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Note saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/clear": {
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Clear captured events",
+        "description": "Clear buffered events, optionally scoped to specific device IPs (all devices when omitted).",
+        "operationId": "clearNetworkEvents",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "deviceIps": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "ipv4"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/setup-capture": {
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Request packet-capture access",
+        "description": "Best-effort attempt to grant this server raw packet-capture access (e.g. a setcap grant on Linux). A no-op on a server already running as root; returns structured remediation when it can't be granted automatically.",
+        "operationId": "setupNetworkCapture",
+        "responses": {
+          "200": {
+            "description": "Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/traffic-rules": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Get all devices' traffic rules",
+        "description": "Get the block/throttle/rewrite/mock rules currently configured for every device, keyed by device IP.",
+        "operationId": "getNetworkTrafficRules",
+        "responses": {
+          "200": {
+            "description": "All traffic rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "rules": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/components/schemas/DeviceTrafficRules"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/device/{ip}/traffic-rules": {
+      "put": {
+        "tags": ["Network Inspector"],
+        "summary": "Set a device's traffic rules",
+        "description": "Replace the block/throttle/rewrite/mock rules for one device. POST is equivalent.",
+        "operationId": "setDeviceTrafficRules",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rules": {
+                    "$ref": "#/components/schemas/DeviceTrafficRules"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "rules": {
+                      "$ref": "#/components/schemas/DeviceTrafficRules"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Set a device's traffic rules (alias of PUT)",
+        "description": "Identical to PUT /network/device/{ip}/traffic-rules.",
+        "operationId": "setDeviceTrafficRulesPost",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rules": {
+                    "$ref": "#/components/schemas/DeviceTrafficRules"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "rules": {
+                      "$ref": "#/components/schemas/DeviceTrafficRules"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/replay": {
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Replay (edit & resend) a request",
+        "description": "Re-issue an HTTP(S) request from this server host, optionally attributed to a device's event list and/or run through that device's traffic rules.",
+        "operationId": "replayNetworkRequest",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["input"],
+                "properties": {
+                  "deviceIp": {
+                    "type": "string",
+                    "format": "ipv4",
+                    "description": "Attribute the resulting synthetic event to this device's list"
+                  },
+                  "input": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                      "method": {
+                        "type": "string",
+                        "default": "GET"
+                      },
+                      "url": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "headers": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      },
+                      "body": {
+                        "type": "string"
+                      },
+                      "bodyEncoding": {
+                        "type": "string",
+                        "enum": ["text", "base64"]
+                      }
+                    }
+                  },
+                  "applyTrafficRules": {
+                    "type": "boolean",
+                    "description": "Run the replay through deviceIp's block/throttle/rewrite rules"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "description": "Clamped to [1000, 60000]"
+                  }
+                }
+              },
+              "example": {
+                "input": {
+                  "method": "GET",
+                  "url": "https://example.com/api/status"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replay result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/find": {
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Search captured content",
+        "description": "Cross-request content search (URL / headers / bodies) across one device's captured events, up to 5 search terms.",
+        "operationId": "findNetworkContent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["deviceIp", "options"],
+                "properties": {
+                  "deviceIp": {
+                    "type": "string",
+                    "format": "ipv4"
+                  },
+                  "options": {
+                    "type": "object",
+                    "properties": {
+                      "terms": {
+                        "type": "array",
+                        "maxItems": 5,
+                        "items": {
+                          "type": "object",
+                          "required": ["query"],
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "query": {
+                              "type": "string"
+                            },
+                            "scopes": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "caseSensitive": {
+                              "type": "boolean"
+                            },
+                            "regex": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "matches": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/recording": {
+      "post": {
+        "tags": ["Network Inspector"],
+        "summary": "Pause/resume capture for devices",
+        "description": "Pause or resume capture for specific devices without disconnecting them.",
+        "operationId": "setNetworkRecording",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "deviceIps": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "ipv4"
+                    }
+                  },
+                  "recording": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/export-pcap": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Export raw packets as a PCAP file",
+        "description": "Export raw captured frames as a .pcap file, optionally scoped to a comma-separated list of device IPs (all devices when omitted). Only frames actually captured on the local capture interface are included - MITM-only sessions may have nothing to export (see NetworkInspectorStatus.rawPacketsAvailable).",
+        "operationId": "exportNetworkPcap",
+        "parameters": [
+          {
+            "name": "deviceIps",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated device IPs",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PCAP file bytes",
+            "content": {
+              "application/vnd.tcpdump.pcap": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Export failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/ca/info": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Get MITM CA certificate info",
+        "description": "Get metadata about this server's MITM root CA certificate (used to decrypt HTTPS) and the proxy's listen address.",
+        "operationId": "getNetworkCaInfo",
+        "responses": {
+          "200": {
+            "description": "CA info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "caInfo": {
+                      "$ref": "#/components/schemas/NetworkInspectorCaInfo"
+                    },
+                    "proxyHostPort": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/ca/pem": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Download MITM CA certificate (PEM)",
+        "description": "Download this server's MITM root CA certificate in PEM format, so a Roku device (or a browser) can be made to trust it.",
+        "operationId": "downloadNetworkCaPem",
+        "responses": {
+          "200": {
+            "description": "PEM file",
+            "content": {
+              "application/x-pem-file": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Export failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/ca/cert": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Download MITM CA certificate (CRT)",
+        "description": "Download this server's MITM root CA certificate in .crt (X.509 DER-ish) format.",
+        "operationId": "downloadNetworkCaCert",
+        "responses": {
+          "200": {
+            "description": "CRT file",
+            "content": {
+              "application/x-x509-ca-cert": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Export failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/network/stream": {
+      "get": {
+        "tags": ["Network Inspector"],
+        "summary": "Live Network Inspector event stream (SSE)",
+        "description": "Server-Sent Events stream of status updates and new event batches. Bodies are NOT included on the wire - fetch a specific event's full detail on demand via GET /network/event/{eventId}. The server sends no `retry:` hint and drops SSE clients silently on close, so clients must re-dial with capped backoff after a server restart (the desktop app does).",
+        "operationId": "streamNetworkEvents",
+        "responses": {
+          "200": {
+            "description": "text/event-stream - a sequence of `data: {...}` frames, each `{\"type\": \"status\"|\"events\", \"payload\": ...}`",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/debugger/stream": {
+      "get": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Live debugger event stream (SSE)",
+        "description": "Server-Sent Events stream of debugger session events (state changes, stopped/suspended snapshots, console output, runtime errors, compile errors, breakpoint updates) across all attached devices. Returns 503 when the debug-session controller failed to load on this server. The server sends no `retry:` hint and drops SSE clients silently on close, so clients must re-dial with capped backoff after a server restart (the desktop app does).",
+        "operationId": "streamDebuggerEvents",
+        "responses": {
+          "200": {
+            "description": "text/event-stream - a sequence of `data: {...}` frames, each `{\"type\": <DebuggerEventKind>, \"payload\": ...}`",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "BrightScript Debugger is not available on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/attach": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Attach the debugger",
+        "description": "Open a debug-protocol session to the device's control port 8081 (retries for up to ~20s to cover the post-sideload timing window). The control port is single-client; attaching tears down any existing session for this IP first.",
+        "operationId": "debuggerAttach",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Attach result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/detach": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Detach the debugger",
+        "description": "Close and forget the debug session for this device (idempotent).",
+        "operationId": "debuggerDetach",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/status": {
+      "get": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Get debugger session status",
+        "description": "Get the current session state for this device (not attached if no session exists).",
+        "operationId": "debuggerStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/DebuggerSessionStatus"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/continue": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Continue execution",
+        "description": "Resume a halted (stopped) session.",
+        "operationId": "debuggerContinue",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/pause": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Pause execution",
+        "description": "Halt a running session.",
+        "operationId": "debuggerPause",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/step-over": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Step (step-over)",
+        "description": "Resume execution until the next suspend, stepping over/into/out of the current line. Optionally scoped to a specific thread.",
+        "operationId": "debuggerStepOver",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "threadIndex": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Step issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/step-in": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Step (step-in)",
+        "description": "Resume execution until the next suspend, stepping over/into/out of the current line. Optionally scoped to a specific thread.",
+        "operationId": "debuggerStepIn",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "threadIndex": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Step issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/step-out": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Step (step-out)",
+        "description": "Resume execution until the next suspend, stepping over/into/out of the current line. Optionally scoped to a specific thread.",
+        "operationId": "debuggerStepOut",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "threadIndex": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Step issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/stack-trace": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Get the call stack",
+        "description": "Get the stack frames for a halted session's thread (defaults to the active thread).",
+        "operationId": "debuggerStackTrace",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "threadIndex": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stack frames",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      },
+                      "description": "Stack frame entries, forwarded from the debug protocol"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/variables": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Get variables",
+        "description": "Get variables for a halted session's thread/stack frame, or drill into a container's children via variablePath.",
+        "operationId": "debuggerVariables",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "threadIndex": {
+                    "type": "integer"
+                  },
+                  "stackFrameIndex": {
+                    "type": "integer"
+                  },
+                  "variablePath": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Path of container keys to drill into (e.g. a nested associative array)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Variables",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      },
+                      "description": "Variable entries, forwarded from the debug protocol"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/execute": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Execute BrightScript (REPL)",
+        "description": "Run a line of BrightScript in the context of a halted session's thread/stack frame.",
+        "operationId": "debuggerExecute",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sourceCode"],
+                "properties": {
+                  "sourceCode": {
+                    "type": "string"
+                  },
+                  "threadIndex": {
+                    "type": "integer"
+                  },
+                  "stackFrameIndex": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "sourceCode": "print m.top.id"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Execution result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "description": "Forwarded from the debug protocol's executeCommand response"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing sourceCode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/add-breakpoints": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Add breakpoints",
+        "description": "Queue breakpoints for this session. Breakpoints only register on the device while it's halted - if the session is currently running, the request is echoed back as `pending` and the controller flushes it to the device at the next stop.",
+        "operationId": "debuggerAddBreakpoints",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "breakpoints": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["filePath", "lineNumber"],
+                      "properties": {
+                        "filePath": {
+                          "type": "string"
+                        },
+                        "lineNumber": {
+                          "type": "integer"
+                        },
+                        "conditionalExpression": {
+                          "type": "string"
+                        },
+                        "hitCount": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registered/queued breakpoints",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/device/{ip}/debugger/remove-breakpoints-by-location": {
+      "post": {
+        "tags": ["BrightScript Debugger"],
+        "summary": "Remove breakpoints by location",
+        "description": "Remove breakpoints identified by file path + line number (not by device breakpoint id - a queued breakpoint has no id yet).",
+        "operationId": "debuggerRemoveBreakpointsByLocation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DeviceIP"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "locations": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["filePath", "lineNumber"],
+                      "properties": {
+                        "filePath": {
+                          "type": "string"
+                        },
+                        "lineNumber": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Removal result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "removed": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "DeviceIP": {
+        "name": "ip",
+        "in": "path",
+        "required": true,
+        "description": "IP address of the Roku device",
+        "schema": {
+          "type": "string",
+          "format": "ipv4"
+        },
+        "example": "192.168.1.100"
+      },
+      "TelnetSystemPort": {
+        "name": "port",
+        "in": "query",
+        "required": false,
+        "description": "Which Roku text console to dial: 8080 (SceneGraph system console, default) or 8087 (screensaver console). Any other value is rejected with 400 'Unsupported port'. Advertised as capabilities.telnetSystemPorts.",
+        "schema": {
+          "type": "integer",
+          "enum": [8080, 8087],
+          "default": 8080
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Optional shared secret. Only enforced when the server was started with ROKU_ENGINEER_RELAY_TOKEN=<secret>; then every route except GET /health, plus the /telnet/stream WebSocket upgrade, requires 'Authorization: Bearer <secret>' (or ?token=<secret>, mainly for WebSocket clients that can't set headers). Compared in constant time. With the variable unset the server is fully open and logs a startup warning."
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "ROKU_ENGINEER_RELAY_TOKEN is set and the request carried no valid Bearer token / ?token=",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "success": false,
+              "error": "Unauthorized"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SuccessResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "status": {
+            "type": "integer",
+            "example": 200
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": false
+          },
+          "error": {
+            "type": "string",
+            "example": "Connection refused"
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "QueryResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "string",
+            "description": "Raw XML response from the Roku ECP endpoint"
+          },
+          "status": {
+            "type": "integer"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "apiVersion": {
+            "type": "string",
+            "description": "Version of the roku-engineer-studio-api package this server bundles ('unknown' if unavailable)",
+            "example": "1.2.0"
+          },
+          "serverVersion": {
+            "type": "string",
+            "description": "This server's own release version (roku-engineer-studio-remote-server), independent of apiVersion",
+            "example": "1.1.0"
+          },
+          "hostname": {
+            "type": "string",
+            "example": "mac-mini.local"
+          },
+          "platform": {
+            "type": "string",
+            "example": "darwin"
+          },
+          "uptime": {
+            "type": "number",
+            "description": "Server uptime in seconds",
+            "example": 3600.5
+          },
+          "deviceCount": {
+            "type": "integer",
+            "description": "Number of cached Roku devices",
+            "example": 3
+          },
+          "telnetSessions": {
+            "type": "integer",
+            "description": "Number of active telnet sessions",
+            "example": 1
+          }
+        }
+      },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of the bundled roku-engineer-studio-api package (kept under this key for backward compatibility - not the server's own release version, see serverVersion)",
+            "example": "1.2.0"
+          },
+          "serverVersion": {
+            "type": "string",
+            "description": "This server's own release version (roku-engineer-studio-remote-server)",
+            "example": "1.1.0"
+          },
+          "capabilities": {
+            "type": "object",
+            "description": "Map of feature names to enabled status",
+            "properties": {
+              "remote": {
+                "type": "boolean",
+                "description": "Remote control (keypress, text input)"
+              },
+              "apps": {
+                "type": "boolean",
+                "description": "App listing and launching"
+              },
+              "query": {
+                "type": "boolean",
+                "description": "Device queries (info, apps, media-player, etc.)"
+              },
+              "devApp": {
+                "type": "boolean",
+                "description": "Dev app sideloading"
+              },
+              "screenshot": {
+                "type": "boolean",
+                "description": "Screenshot capture"
+              },
+              "console": {
+                "type": "boolean",
+                "description": "Telnet debug console (port 8085)"
+              },
+              "telnetSystemPorts": {
+                "type": "array",
+                "description": "Text-console ports the /telnet-system/* routes accept via ?port= (8080 is used when the query is absent). Older servers omit this key - treat that as [8080]",
+                "items": {
+                  "type": "integer"
+                },
+                "example": [8080, 8087]
+              },
+              "appConnector": {
+                "type": "boolean",
+                "description": "RALE App Connector / Inspector"
+              },
+              "deepLink": {
+                "type": "boolean",
+                "description": "Deep-Linking support"
+              },
+              "verifyDevAuth": {
+                "type": "boolean",
+                "description": "Digest auth check against port 80 (verify a developer password without capturing a screenshot)"
+              },
+              "debugger": {
+                "type": "boolean",
+                "description": "BrightScript socket debugger (control port 8081) - false when the debug-session controller failed to load on this server"
+              },
+              "networkInspector": {
+                "type": "object",
+                "description": "Static support + live state for the remote Network Inspector (MITM capture)",
+                "properties": {
+                  "supported": {
+                    "type": "boolean",
+                    "description": "Root + endpoints wired in - does NOT imply capture is currently enabled/bound"
+                  },
+                  "requiresRoot": {
+                    "type": "boolean"
+                  },
+                  "isRoot": {
+                    "type": "boolean"
+                  },
+                  "mitmPort": {
+                    "type": "integer"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "mitmEnabled": {
+                    "type": "boolean"
+                  },
+                  "mitmActive": {
+                    "type": "boolean"
+                  },
+                  "mitmLastError": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "serverInfo": {
+            "type": "object",
+            "properties": {
+              "hostname": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "nodeVersion": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "TelnetConnectResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "Unique session ID for WebSocket streaming"
+          }
+        }
+      },
+      "TelnetSession": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "deviceIP": {
+            "type": "string",
+            "format": "ipv4"
+          },
+          "connectedClients": {
+            "type": "integer",
+            "description": "Number of WebSocket clients receiving logs"
+          },
+          "lastActivity": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DeviceInfo": {
+        "type": "object",
+        "properties": {
+          "ip": {
+            "type": "string",
+            "example": "192.168.1.100"
+          },
+          "port": {
+            "type": "string",
+            "example": "8060"
+          },
+          "deviceName": {
+            "type": "string",
+            "example": "Living Room Roku"
+          },
+          "modelName": {
+            "type": "string",
+            "example": "Roku Ultra"
+          },
+          "modelNumber": {
+            "type": "string",
+            "example": "4800X"
+          },
+          "serialNumber": {
+            "type": "string",
+            "example": "X01000ABCD12"
+          },
+          "softwareVersion": {
+            "type": "string",
+            "example": "15.0.4"
+          },
+          "softwareBuild": {
+            "type": "string",
+            "example": "5534"
+          },
+          "wifiMac": {
+            "type": "string",
+            "example": "aa:bb:cc:dd:ee:76"
+          },
+          "ethernetMac": {
+            "type": "string",
+            "example": "aa:bb:cc:dd:ee:77"
+          },
+          "networkType": {
+            "type": "string",
+            "enum": ["wifi", "ethernet"],
+            "example": "wifi"
+          },
+          "vendorName": {
+            "type": "string",
+            "example": "Roku"
+          },
+          "deviceId": {
+            "type": "string"
+          },
+          "screenSize": {
+            "type": "string"
+          },
+          "supportsSuspend": {
+            "type": "string"
+          },
+          "supportsPrivateListening": {
+            "type": "string"
+          },
+          "headphonesConnected": {
+            "type": "string"
+          },
+          "powerMode": {
+            "type": "string",
+            "enum": ["PowerOn", "Suspend", "DisplayOff"],
+            "example": "PowerOn"
+          },
+          "developerEnabled": {
+            "type": "boolean",
+            "example": true
+          },
+          "keyedDeveloperId": {
+            "type": "string"
+          },
+          "isTv": {
+            "type": "boolean",
+            "example": false
+          }
+        }
+      },
+      "DeviceListResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceInfo"
+            }
+          }
+        }
+      },
+      "DeviceInfoResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "deviceInfo": {
+            "$ref": "#/components/schemas/DeviceInfo"
+          }
+        }
+      },
+      "NetworkInspectorStatus": {
+        "type": "object",
+        "description": "Network Inspector engine status. Abbreviated here to the fields most callers need - the full object also carries per-platform capture-readiness diagnostics (npcapInstalled, bpfCaptureAvailable, prerequisites, etc.).",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": "string",
+            "enum": ["darwin", "win32", "linux"]
+          },
+          "captureActive": {
+            "type": "boolean"
+          },
+          "connectedClients": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "matchedSerials": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "packetsCaptured": {
+            "type": "integer"
+          },
+          "rawPacketsAvailable": {
+            "type": "integer",
+            "description": "Raw frames retained for PCAP export - 0 for MITM-only sessions with nothing to export"
+          },
+          "eventsBuffered": {
+            "type": "integer"
+          },
+          "lastError": {
+            "type": "string"
+          },
+          "mitmEnabled": {
+            "type": "boolean"
+          },
+          "mitmActive": {
+            "type": "boolean"
+          },
+          "mitmPort": {
+            "type": "integer"
+          },
+          "mitmListenAddress": {
+            "type": "string"
+          },
+          "mitmLastError": {
+            "type": "string"
+          },
+          "maxRawPacketsPerDevice": {
+            "type": "integer"
+          },
+          "trafficRules": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DeviceTrafficRules"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "NetworkInspectorConfig": {
+        "type": "object",
+        "description": "Persisted remote Network Inspector config for this server (~/.roku-engineer-studio-remote/network-inspector.json).",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Master switch - off by default"
+          },
+          "mitmEnabled": {
+            "type": "boolean",
+            "description": "MITM HTTPS decryption - on by default when enabled is true"
+          },
+          "mitmPort": {
+            "type": "integer"
+          },
+          "maxRawPacketsPerDevice": {
+            "type": "integer"
+          }
+        }
+      },
+      "NetworkHttpMessage": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "statusCode": {
+            "type": "integer"
+          },
+          "statusText": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "body": {
+            "type": "string"
+          },
+          "bodyTruncated": {
+            "type": "boolean"
+          },
+          "bodyEncoding": {
+            "type": "string",
+            "enum": ["text", "base64"]
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "bodyBytes": {
+            "type": "integer"
+          }
+        }
+      },
+      "NetworkEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["dns-query", "dns-response", "tls-handshake", "tcp-connection", "udp-datagram", "http-transaction"]
+          },
+          "deviceIp": {
+            "type": "string",
+            "format": "ipv4"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "sni": {
+            "type": "string"
+          },
+          "destIp": {
+            "type": "string"
+          },
+          "destPort": {
+            "type": "integer"
+          },
+          "httpRequest": {
+            "$ref": "#/components/schemas/NetworkHttpMessage"
+          },
+          "httpResponse": {
+            "$ref": "#/components/schemas/NetworkHttpMessage"
+          },
+          "mitm": {
+            "type": "boolean",
+            "description": "Captured via the local MITM proxy (decrypted HTTPS)"
+          },
+          "replay": {
+            "type": "boolean",
+            "description": "Produced by Replay / Edit & Resend rather than intercepted from the device"
+          },
+          "durationMs": {
+            "type": "number"
+          },
+          "detailAvailable": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "DeviceTrafficRules": {
+        "type": "object",
+        "description": "Block/throttle/rewrite/mock rules for one device's proxied traffic.",
+        "properties": {
+          "blockAll": {
+            "type": "boolean"
+          },
+          "noCaching": {
+            "type": "boolean"
+          },
+          "blockCookies": {
+            "type": "boolean"
+          },
+          "throttle": {
+            "type": "object",
+            "properties": {
+              "downKbps": {
+                "type": "integer"
+              },
+              "latencyMs": {
+                "type": "integer"
+              }
+            }
+          },
+          "hosts": {
+            "type": "array",
+            "description": "Per-host overrides - see the package README for the full rule shape (block/throttle/mock/rewrite/pathContains)",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "ReplayResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "request": {
+            "$ref": "#/components/schemas/NetworkHttpMessage"
+          },
+          "response": {
+            "$ref": "#/components/schemas/NetworkHttpMessage"
+          },
+          "durationMs": {
+            "type": "number"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "destPort": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "NetworkInspectorCaInfo": {
+        "type": "object",
+        "properties": {
+          "commonName": {
+            "type": "string"
+          },
+          "fingerprintSha256": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "proxyHostPort": {
+            "type": "string"
+          }
+        }
+      },
+      "DebuggerSessionStatus": {
+        "type": "object",
+        "properties": {
+          "ip": {
+            "type": "string",
+            "format": "ipv4"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["connecting", "attached", "stopped", "running", "disconnected", "error"]
+          },
+          "protocolVersion": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
+

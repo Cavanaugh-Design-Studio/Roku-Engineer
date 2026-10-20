@@ -1,0 +1,103 @@
+/**
+ * Preload for the Settings modal window (same isolation pattern as preload-about).
+ */
+const { contextBridge, ipcRenderer } = require('electron');
+import type { IpcRendererEvent } from 'electron';
+const { IPC } = require('./shared/ipc/channels');
+
+contextBridge.exposeInMainWorld('settingsApi', {
+  // Crash-report modal: read the enable/disable setting + environment info, and open the
+  // prefilled GitHub issue URL when the user clicks "Report on GitHub".
+  getSetting: (key: string) => ipcRenderer.invoke(IPC.SettingsGet, key),
+  getAppInfo: () => ipcRenderer.invoke(IPC.GetAppInfo),
+  openExternal: (url: string) => ipcRenderer.invoke(IPC.ShellOpenExternal, url),
+
+  // Privacy Mode — mirrors the main/Fiddle bridge so the Settings window can blur
+  // IPs/serials (e.g. the Sideload Relay device table) in lockstep. Reads the
+  // current state at open; the main process fans `IPC.PrivacyModeChanged` to every
+  // open window so a menu / other-window toggle flows through live.
+  getPrivacyMode: () => ipcRenderer.invoke(IPC.GetPrivacyMode) as Promise<{ enabled: boolean }>,
+  onPrivacyModeChanged: (callback: (enabled: boolean) => void) => {
+    const handler = (_e: IpcRendererEvent, enabled: boolean) => callback(enabled);
+    ipcRenderer.on(IPC.PrivacyModeChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.PrivacyModeChanged, handler);
+  },
+
+  // Language — apply live on dropdown change: main persists, re-labels the native menu,
+  // and fans `IPC.LocaleChanged` to every window (including this one) to retranslate.
+  setLanguage: (code: string) => ipcRenderer.invoke(IPC.SetLocale, code),
+  onLocaleChanged: (callback: (pref: string) => void) => {
+    const handler = (_e: IpcRendererEvent, pref: string) => callback(pref);
+    ipcRenderer.on(IPC.LocaleChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.LocaleChanged, handler);
+  },
+
+  // Signal main that the initial getState() population is complete, so it can reveal the
+  // window fully-rendered (no toggle/section-populate flash). Main also has a fallback timer.
+  notifyReady: () => ipcRenderer.send(IPC.SettingsWindowReady),
+  getState: () => ipcRenderer.invoke(IPC.SettingsWindowGetState),
+  save: (payload: unknown) => ipcRenderer.invoke(IPC.SettingsWindowSave, payload),
+  pickFolder: () => ipcRenderer.invoke(IPC.SettingsWindowPickFolder),
+  openMcpConfig: (id: string) => ipcRenderer.invoke(IPC.SettingsWindowOpenMcpConfig, { id }),
+  closeWindow: () => ipcRenderer.send(IPC.SettingsWindowClose),
+  // "Demo App" button shown next to the "Show Try Demo App Button" toggle when it's off — asks
+  // main to bring the main window forward and open the same picker modal there.
+  requestOpenTryDemoApp: () => ipcRenderer.invoke(IPC.DemoAppRequestOpen) as Promise<{ success: boolean }>,
+  getNetworkInspectorStatus: () => ipcRenderer.invoke(IPC.NetworkInspectorGetStatus),
+  installBpfAccess: () => ipcRenderer.invoke(IPC.NetworkInspectorInstallBpfAccess),
+  // Certificate Authority (read-only CA card in the Network Inspector tab). The handlers are
+  // registered globally on ipcMain, so invoke from the settings webContents reaches them.
+  networkInspectorGetCaInfo: () => ipcRenderer.invoke(IPC.NetworkInspectorGetCaInfo),
+  networkInspectorExportCaPem: () => ipcRenderer.invoke(IPC.NetworkInspectorExportCaPem),
+  networkInspectorExportCaCert: () => ipcRenderer.invoke(IPC.NetworkInspectorExportCaCert),
+  // Remote Network Inspector (per-location): probe capability + config, and apply config.
+  remoteNetworkProbe: (serverUrl: string) =>
+    ipcRenderer.invoke(IPC.SettingsWindowRemoteNetworkProbe, { serverUrl }),
+  remoteNetworkSetConfig: (serverUrl: string, config: unknown) =>
+    ipcRenderer.invoke(IPC.SettingsWindowRemoteNetworkSetConfig, { serverUrl, config }),
+  // Remote CA (per-location Certificate Authority card). Reuses the same IPC.RemoteNetwork*
+  // channels the main window's device panels use — those handlers are registered globally on
+  // ipcMain (see main/ipc/remote-handlers.ts), so invoking them from the Settings webContents
+  // reaches them exactly like the local NetworkInspector* CA channels above.
+  remoteNetworkGetCaInfo: (serverUrl: string) =>
+    ipcRenderer.invoke(IPC.RemoteNetworkGetCaInfo, { serverUrl }),
+  remoteNetworkExportCaPem: (serverUrl: string) =>
+    ipcRenderer.invoke(IPC.RemoteNetworkExportCaPem, { serverUrl }),
+  remoteNetworkExportCaCert: (serverUrl: string) =>
+    ipcRenderer.invoke(IPC.RemoteNetworkExportCaCert, { serverUrl }),
+
+  // Sideload Relay — config (gate/port/password/flags/targets) + live per-device results.
+  sideloadRelayGetStatus: () => ipcRenderer.invoke(IPC.SideloadRelayGetStatus),
+  sideloadRelayGetConfig: () => ipcRenderer.invoke(IPC.SideloadRelayGetConfig),
+  sideloadRelayApply: (payload: unknown) => ipcRenderer.invoke(IPC.SideloadRelayApplySettings, payload),
+  sideloadRelaySeedTargets: (includeSubnetScan?: boolean) =>
+    ipcRenderer.invoke(IPC.SideloadRelaySeedTargets, { includeSubnetScan }),
+  sideloadRelayValidatePassword: (payload: {
+    ip: string;
+    serial?: string;
+    remote?: boolean;
+    serverUrl?: string;
+    password: string;
+  }) => ipcRenderer.invoke(IPC.SideloadRelayValidatePassword, payload),
+  sideloadRelayRevealPassword: () => ipcRenderer.invoke(IPC.SideloadRelayRevealPassword),
+  onSideloadRelayStatus: (callback: (status: unknown) => void) => {
+    const handler = (_e: IpcRendererEvent, status: unknown) => callback(status);
+    ipcRenderer.on(IPC.SideloadRelayStatus, handler);
+    return () => ipcRenderer.removeListener(IPC.SideloadRelayStatus, handler);
+  },
+  onSideloadRelayConfigChanged: (callback: (config: unknown) => void) => {
+    const handler = (_e: IpcRendererEvent, config: unknown) => callback(config);
+    ipcRenderer.on(IPC.SideloadRelayConfigChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.SideloadRelayConfigChanged, handler);
+  },
+  onSideloadRelayRunStarted: (callback: (run: unknown) => void) => {
+    const handler = (_e: IpcRendererEvent, run: unknown) => callback(run);
+    ipcRenderer.on(IPC.SideloadRelayRunStarted, handler);
+    return () => ipcRenderer.removeListener(IPC.SideloadRelayRunStarted, handler);
+  },
+  onSideloadRelayResult: (callback: (result: unknown) => void) => {
+    const handler = (_e: IpcRendererEvent, result: unknown) => callback(result);
+    ipcRenderer.on(IPC.SideloadRelayResult, handler);
+    return () => ipcRenderer.removeListener(IPC.SideloadRelayResult, handler);
+  }
+});

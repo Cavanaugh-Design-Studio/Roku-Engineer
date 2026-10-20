@@ -1,0 +1,305 @@
+{
+  "name": "roku-engineer-studio",
+  "version": "3.0.0",
+  "description": "Roku Engineer Studio - Control your Roku device over the local network",
+  "homepage": "https://github.com/Cavanaugh-Design-Studio/Roku-Engineer",
+  "main": "main.bundled.cjs",
+  "private": true,
+  "scripts": {
+    "start": "tsx scripts/build/index.ts && tsx scripts/run-electron.ts",
+    "renderer:solid:build": "vite build",
+    "renderer:solid:dev": "vite --host 127.0.0.1",
+    "renderer:solid:typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:electron": "tsc --noEmit -p tsconfig.electron.json",
+    "pretypecheck:renderer": "tsx scripts/build/ensure-modern-screenshot-vendor.ts && tsx scripts/build/ensure-tanstack-virtual-vendor.ts",
+    "typecheck:renderer": "tsc --noEmit -p tsconfig.renderer.json",
+    "verify:structured-pills": "tsx scripts/verify-structured-pills.ts",
+    "verify:console-filter-perf": "tsx scripts/verify-console-filter-perf.ts",
+    "verify:log-file-index-yields": "tsx scripts/verify-log-file-index-yields.ts",
+    "verify:launch-file-argv": "tsx scripts/verify-launch-file-argv.ts",
+    "verify:main-window-file-drop": "cross-env TSX_TSCONFIG_PATH=./tsconfig.scripts.json tsx scripts/verify-main-window-file-drop.ts",
+    "verify:log-file-window-chunking": "tsx scripts/verify-log-file-window-chunking.ts",
+    "verify:i18n": "tsx scripts/verify-i18n-keys.ts",
+    "verify:telnet-single-flight": "tsx scripts/verify-telnet-single-flight.ts",
+    "verify:held-pool": "tsx scripts/verify-held-pool.ts",
+    "verify:debugger-enabled": "tsx scripts/verify-debugger-enabled.ts",
+    "verify:mcp-tools": "tsx scripts/verify-mcp-tools-catalog.ts",
+    "verify:rce-account-prune": "tsx scripts/verify-rce-account-prune.ts",
+    "verify:artifact-names": "tsx scripts/verify-artifact-names.ts",
+    "verify:auto-connect-store": "tsx scripts/verify-auto-connect-store.ts",
+    "verify:doc-versions": "tsx scripts/verify-doc-versions.ts",
+    "verify:updater-errors": "tsx scripts/verify-updater-errors.ts",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
+    "dev:solid": "tsx scripts/build/index.ts && concurrently -k \"npm run renderer:solid:dev\" \"wait-on tcp:127.0.0.1:5173 && cross-env ROKU_ENGINEER_SOLID_RENDERER=1 tsx scripts/run-electron.ts\"",
+    "build:desktop": "tsx scripts/build/index.ts",
+    "build:preload": "tsx scripts/build/index.ts",
+    "build:bundle": "tsx scripts/build/index.ts",
+    "clean:dist": "tsx scripts/cleanup-old-builds.ts",
+    "build": "npm run build:bundle && npm run clean:dist && electron-builder --publish never",
+    "build:mac": "npm run build:bundle && npm run clean:dist && tsx scripts/build/electron-builder-mac.ts",
+    "build:mac:intel": "npm run build:bundle && npm run clean:dist && tsx scripts/build/electron-builder-mac.ts dmg:x64 zip:x64",
+    "build:win": "npm run build:bundle && npm run clean:dist && electron-builder --win --publish never",
+    "build:win:diagnostic": "tsx scripts/build-diagnostic.ts win",
+    "build:mac:diagnostic": "tsx scripts/build-diagnostic.ts mac",
+    "build:linux:diagnostic": "tsx scripts/build-diagnostic.ts linux",
+    "build:all:diagnostic": "tsx scripts/build-diagnostic.ts all",
+    "build:linux": "npm run build:bundle && npm run clean:dist && electron-builder --linux --publish never",
+    "build:all": "npm run build:bundle && npm run clean:dist && concurrently --names mac,linux,win --prefix-colors cyan,green,magenta \"tsx scripts/build/electron-builder-mac.ts -c.npmRebuild=false\" \"electron-builder --linux -c.npmRebuild=false --publish never\" \"electron-builder --win -c.npmRebuild=false --publish never\""
+  },
+  "author": {
+    "name": "Cavanaugh Design Studio",
+    "url": "https://github.com/Cavanaugh-Design-Studio"
+  },
+  "company": "Cavanaugh Design Studio",
+  "license": "MIT",
+  "dependencies": {
+    "@tanstack/virtual-core": "^3.17.8",
+    "adm-zip": "^0.6.1",
+    "brighterscript": "^0.73.0",
+    "electron-updater": "^6.8.9",
+    "form-data": "^4.0.6",
+    "modern-screenshot": "^4.7.0",
+    "monaco-editor": "^0.57.0",
+    "node-forge": "^1.4.0",
+    "pdf-lib": "^1.17.1",
+    "roku-engineer-studio-api": "file:../../packages/roku-engineer-studio-api",
+    "roku-engineer-studio-mcp": "file:../../packages/roku-engineer-studio-mcp",
+    "roku-engineer-studio-platform": "file:../../packages/roku-engineer-studio-platform",
+    "roku-engineer-studio-rce": "file:../../packages/roku-engineer-studio-rce",
+    "solid-js": "^1.9.16",
+    "ws": "^8.21.0"
+  },
+  "optionalDependencies": {
+    "cap": "^0.2.1"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "0.5.8",
+    "@types/jsdom": "28.0.3",
+    "@types/node": "22.20.3",
+    "@types/node-forge": "1.3.14",
+    "@types/ws": "8.18.1",
+    "concurrently": "^10.0.6",
+    "cross-env": "10.1.0",
+    "electron": "44.9.1",
+    "electron-builder": "26.16.1",
+    "esbuild": "0.28.2",
+    "jsdom": "29.1.1",
+    "sharp": "^0.35.5",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vite-plugin-solid": "2.11.14",
+    "wait-on": "9.1.0"
+  },
+  "build": {
+    "appId": "com.cavanaughdesign.roku-engineer-studio",
+    "productName": "Roku Engineer Studio",
+    "artifactName": "Roku-Engineer-Studio-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Cavanaugh-Design-Studio",
+      "repo": "Roku-Engineer"
+    },
+    "afterAllArtifactBuild": "./scripts/build-hooks-entry.cjs",
+    "files": [
+      "**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}",
+      "!dist/**",
+      "!scripts/**",
+      "!*.md",
+      "!main/**/*.ts",
+      "!renderer/**/*.ts",
+      "!renderer/**/*.tsx",
+      "!shared/**/*.ts",
+      "!src/**/*.ts",
+      "!src/**/*.tsx",
+      "!main.ts",
+      "!preload.ts",
+      "!**/*.d.ts",
+      "!**/*.map",
+      "!tsconfig*.json",
+      "!vite.config.ts",
+      "!apps/**"
+    ],
+    "asarUnpack": [
+      "**/node_modules/cap/**",
+      "network-session-parse.worker.js",
+      "leaf-cert.worker.js"
+    ],
+    "compression": "maximum",
+    "fileAssociations": [
+      {
+        "ext": [
+          "log",
+          "txt",
+          "text",
+          "out",
+          "err",
+          "trace"
+        ],
+        "name": "Log File",
+        "description": "Console / log text file",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "rds-network-inspector.json",
+          "har",
+          "pcap",
+          "pcapng"
+        ],
+        "name": "Network Session",
+        "description": "Roku Engineer Studio network capture session",
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "files": [
+        "!assets/icon.ico",
+        "!assets/ico-parts/**",
+        "!assets/icon.iconset/**"
+      ],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "notarize": true,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "This app needs to discover and communicate with Roku devices on your local network.",
+        "NSBonjourServices": [
+          "_ssdp._udp",
+          "_roku._tcp"
+        ],
+        "NSAppleEventsUsageDescription": "This app needs to communicate with other apps on your system."
+      },
+      "electronLanguages": [
+        "en",
+        "en_GB"
+      ]
+    },
+    "win": {
+      "files": [
+        "!assets/icon.icns",
+        "!assets/icon.iconset/**",
+        "!assets/ico-parts/**",
+        "!entitlements.mac.plist"
+      ],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "files": [
+        "!assets/icon.icns",
+        "!assets/icon.ico",
+        "!assets/icon.iconset/**",
+        "!entitlements.mac.plist"
+      ],
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "icon": "assets/ico-parts",
+      "synopsis": "Roku development and debugging tool",
+      "description": "Roku Engineer Studio - Control your Roku device over the local network"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Roku-Engineer-Studio-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Roku-Engineer-Studio-Portable-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "writeUpdateInfo": true
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1"
+      ],
+      "packageCategory": "devel"
+    },
+    "extraResources": [
+      {
+        "from": "../../third_party",
+        "to": "third_party"
+      },
+      {
+        "from": "../../",
+        "to": "engine",
+        "filter": [
+          "roku_engineer.py",
+          "engineer_bridge.py",
+          "requirements.txt",
+          "system/**/*.py",
+          "example.env",
+          "LICENSE"
+        ]
+      }
+    ]
+  }
+}

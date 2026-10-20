@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": ["node"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // Some script-graph files reach renderer modules that import the shared UI-string
+    // catalog via `@shared/*` (e.g. console-log/console-structured-syntax.ts). Mirror the
+    // renderer/electron path mapping so it resolves here too. Relative target — no baseUrl.
+    "paths": {
+      "@shared/*": ["./shared/*"]
+    }
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "renderer/renderer-globals.d.ts",
+    "renderer/vendor/tanstack-virtual-core.d.ts",
+    "renderer/vendor/tanstack-virtual-core.d.mts"
+  ],
+  "exclude": ["scripts/verify-structured-pills.ts", "scripts/verify-telnet-single-flight.ts"]
+}
