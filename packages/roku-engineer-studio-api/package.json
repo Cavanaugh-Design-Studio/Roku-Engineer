@@ -1,0 +1,74 @@
+{
+  "name": "roku-engineer-studio-api",
+  "version": "1.2.0",
+  "description": "Roku Engineer Studio API \u2014 discovery, ECP, device info, sideload, screenshot (Node.js)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "roku-engineer": "dist/cli.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cavanaugh-Design-Studio/Roku-Engineer.git",
+    "directory": "packages/roku-engineer-studio-api"
+  },
+  "bugs": {
+    "url": "https://github.com/Cavanaugh-Design-Studio/Roku-Engineer/issues"
+  },
+  "homepage": "https://github.com/Cavanaugh-Design-Studio/Roku-Engineer#readme",
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "keywords": [
+    "roku",
+    "roku-developer-tools",
+    "ecp",
+    "brightscript",
+    "ssdp",
+    "discovery",
+    "sideload",
+    "rale",
+    "scenegraph",
+    "roku-automation",
+    "roku-cli",
+    "roku-remote",
+    "tv-automation",
+    "streaming-device"
+  ],
+  "scripts": {
+    "build": "node build.mjs && tsc --emitDeclarationOnly",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "example:direct": "node dist/examples/direct-sample.js",
+    "example:relay": "node dist/examples/relay-sample.js",
+    "rds": "node dist/cli.js",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "archiver": "^5.3.2",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "0.5.8",
+    "@types/archiver": "8.0.0",
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "roku-engineer-studio-platform": "^1.0.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./lib/*": {
+      "types": "./dist/lib/*.d.ts",
+      "default": "./dist/lib/*.js"
+    }
+  }
+}

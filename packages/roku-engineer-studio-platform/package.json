@@ -1,0 +1,72 @@
+{
+  "name": "roku-engineer-studio-platform",
+  "version": "1.0.0",
+  "description": "Shared host-platform helpers for Roku Engineer Studio \u2014 OS identity, human labels, modifier keys (renderer-safe), plus node-only filesystem helpers. Used by the desktop app and other packages so platform logic lives in one place.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cavanaugh-Design-Studio/Roku-Engineer.git",
+    "directory": "packages/roku-engineer-studio-platform"
+  },
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "keywords": [
+    "roku",
+    "platform",
+    "os",
+    "cross-platform"
+  ],
+  "scripts": {
+    "build": "node build.mjs && tsc --emitDeclarationOnly",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    },
+    "./validation": {
+      "types": "./dist/validation.d.ts",
+      "default": "./dist/validation.js"
+    },
+    "./device-ref": {
+      "types": "./dist/device-ref.d.ts",
+      "default": "./dist/device-ref.js"
+    },
+    "./ttl-cache": {
+      "types": "./dist/ttl-cache.d.ts",
+      "default": "./dist/ttl-cache.js"
+    },
+    "./async-patterns": {
+      "types": "./dist/async-patterns.d.ts",
+      "default": "./dist/async-patterns.js"
+    },
+    "./path-safe": {
+      "types": "./dist/path-safe.d.ts",
+      "default": "./dist/path-safe.js"
+    },
+    "./text-match": {
+      "types": "./dist/text-match.d.ts",
+      "default": "./dist/text-match.js"
+    },
+    "./worker-pool": {
+      "types": "./dist/worker-pool.d.ts",
+      "default": "./dist/worker-pool.js"
+    }
+  }
+}

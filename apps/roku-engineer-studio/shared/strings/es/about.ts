@@ -1,0 +1,51 @@
+/**
+ * UI strings for the About window (renderer/components/about/about.ts). Latin American Spanish.
+ *
+ * The `copy*` functions compose the clipboard block the "Copy" button produces;
+ * the static field labels themselves live in about.html.
+ */
+export const about = {
+  // App version line under the logo
+  versionLabel: (v: string): string => `Versión ${v}`,
+
+  // "Copy" button transient feedback (plain text — no ✓ prefix, unlike common.copied)
+  copied: '¡Copiado!',
+
+  // Clipboard block assembled by "Copy"
+  copyAppVersion: (v: string): string => `Versión de Roku Engineer Studio: ${v}`,
+  copyBuildTime: (v: string): string => `Hora de compilación: ${v}`,
+  copyApiVersion: (v: string): string => `Versión de la API de Roku Engineer Studio: ${v}`,
+  copyElectronVersion: (v: string): string => `Versión de Electron: ${v}`,
+  copyNodeVersion: (v: string): string => `Versión de Node.js: ${v}`,
+  copyChromiumVersion: (v: string): string => `Versión de Chromium: ${v}`,
+  copyV8Version: (v: string): string => `Versión de V8: ${v}`,
+  copyOperatingSystem: (v: string): string => `Sistema operativo: ${v}`,
+
+  // Fatal load fallbacks (replace the whole body)
+  apiUnavailable: 'API de Acerca de no disponible.',
+  failedToLoad: (err: string): string => `No se pudo cargar: ${err}`,
+
+  // Window document title + logo image alt text
+  windowTitle: 'Acerca de Roku Engineer Studio',
+  logoAlt: 'Roku Engineer Studio',
+
+  // Main-process dialog.showErrorBox when the About window fails to load
+  loadFailedMessage: 'No se pudo cargar el cuadro de diálogo Acerca de. Inténtelo de nuevo.',
+
+  // Static about.html shell — app name header, version field labels, credit line.
+  // (The version *values* beside these labels are filled by JS; only the labels are localized.)
+  appName: 'Roku Engineer Studio',
+  apiVersionLabel: 'Versión de roku-engineer-studio-api:',
+  electronVersionLabel: 'Versión de Electron:',
+  nodeVersionLabel: 'Versión de Node.js:',
+  chromiumVersionLabel: 'Versión de Chromium:',
+  v8VersionLabel: 'Versión de V8:',
+  osLabel: 'Sistema operativo:',
+  builtBy: 'Desarrollado por',
+  appDetails: 'Detalles de la aplicación',
+  submitIssue: 'Reportar un problema',
+  checkingForUpdates: 'Comprobando…',
+  issueTitle: (v: string): string => `Roku Engineer Studio v${v}: `,
+  issueBody: (details: string): string =>
+    `### Detalles de la aplicación\n\n\`\`\`\n${details}\n\`\`\`\n\n### Qué ocurrió\n\n_Describa el problema y cómo reproducirlo._\n`,
+};

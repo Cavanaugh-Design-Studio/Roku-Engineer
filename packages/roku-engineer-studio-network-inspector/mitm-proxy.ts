@@ -1,0 +1,1828 @@
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
+import * as net from 'net';
+import * as path from 'path';
+import * as tls from 'tls';
+import * as zlib from 'zlib';
+import { createWorkerPool, type WorkerPool } from 'roku-engineer-studio-platform/worker-pool';
+import { type CaMaterial } from './ca-store';
+import { parseRokuProxyTarget, normalizeProxyHostPort } from './roku-proxy-url';
+import type {
+  MockResponse,
+  NetworkHttpMessage,
+  NetworkTimingPhases,
+  ReplayHttpInput,
+  ReplayResult,
+  RewriteOp,
+  TrafficDecision,
+  TrafficThrottle
+} from './types';
+import { throttleIsActive } from './types';
+import { opsFor, applyRequestUrl, applyHeaderOps, statusOverride, applyBodyReplace, hasBodyReplace, hasUrlRewrite } from './rewrite';
+
+/**
+ * Write `body` to a sink at a throttled rate. `downKbps` paces output in ~50ms chunks to approximate
+ * the bandwidth limit; `latencyMs` delays the first byte. Falls back to a single write when no
+ * bandwidth cap is set. Used to simulate slow/laggy networks for proxied responses.
+ */
+function writeBodyThrottled(
+  write: (chunk: Buffer) => void,
+  end: () => void,
+  body: Buffer,
+  throttle: TrafficThrottle
+): void {
+  const downKbps = typeof throttle.downKbps === 'number' && throttle.downKbps > 0 ? throttle.downKbps : 0;
+  const latencyMs = typeof throttle.latencyMs === 'number' && throttle.latencyMs > 0 ? throttle.latencyMs : 0;
+  if (!body.length) {
+    if (latencyMs) setTimeout(end, latencyMs);
+    else end();
+    return;
+  }
+  if (!downKbps) {
+    setTimeout(
+      () => {
+        try {
+          write(body);
+        } catch {
+          /* socket gone */
+        }
+        end();
+      },
+      latencyMs
+    );
+    return;
+  }
+  const bytesPerSec = (downKbps * 1000) / 8;
+  const tickMs = 50;
+  const chunkSize = Math.max(1, Math.floor((bytesPerSec * tickMs) / 1000));
+  let offset = 0;
+  const pump = (): void => {
+    if (offset >= body.length) {
+      try {
+        end();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    const slice = body.subarray(offset, offset + chunkSize);
+    offset += slice.length;
+    try {
+      write(slice);
+    } catch {
+      return;
+    }
+    setTimeout(pump, tickMs);
+  };
+  if (latencyMs) setTimeout(pump, latencyMs);
+  else pump();
+}
+
+export type MitmTransaction = {
+  transactionId: string;
+  deviceIp: string;
+  timestamp: string;
+  hostname: string;
+  destPort?: number;
+  request: NetworkHttpMessage;
+  response: NetworkHttpMessage;
+  durationMs?: number;
+  /** True when produced by a host-originated Replay (see {@link performReplay}) rather than intercepted. */
+  replay?: boolean;
+  /** Per-phase RDS→origin timing breakdown for the waterfall (present only when measurable). */
+  timing?: NetworkTimingPhases;
+};
+
+export type MitmProxyOptions = {
+  port: number;
+  ca: CaMaterial;
+  onTransaction: (tx: MitmTransaction) => void;
+  isHotspotClient: (ip: string) => boolean;
+  gatewayIp?: string;
+  onListening?: () => void;
+  /**
+   * Fired when the server emits an error after `start()` returned — most importantly the
+   * asynchronous `EADDRINUSE` raised during `listen()` when the port is already taken. Lets the
+   * owner surface which process holds the port instead of swallowing the failure.
+   */
+  onError?: (message: string) => void;
+  /** Resolve the block/throttle/mock decision for a proxied request (device IP + host + path). */
+  getTrafficDecision?: (deviceIp: string, hostname: string, path: string) => TrafficDecision;
+};
+
+// Per-message raw body capture cap. Sized so typical media (posters, thumbnails, small
+// JPEG/PNG/WebP assets) is captured whole and can render as an <img> preview — the old
+// 512 KB cap truncated common artwork, corrupting it. Beyond this the body is marked
+// truncated and the UI shows a "preview unavailable" note instead of a broken image.
+// Keep in sync with MAX_BASE64_CHARS in mitm-events.ts (base64 is ~4/3 the raw size).
+const MAX_BODY_BYTES = 4_000_000;
+// Socket idle timeout: fire if the upstream sends no data for this long.
+const REQUEST_TIMEOUT_MS = 30_000;
+// Absolute backstop so a transaction can never stay "Pending" indefinitely, even if the
+// upstream stalls mid-body or the socket aborts without a clean 'error'/'end'.
+const HARD_TIMEOUT_MS = 45_000;
+// Cap retained per-host leaf certs so a long session minting many SNI certs can't grow unbounded.
+const MAX_LEAF_CACHE = 256;
+// Guard the manual TLS request-head parser against an unbounded header block.
+const MAX_REQUEST_HEADER_BYTES = 64 * 1024;
+const HEADER_SEP = Buffer.from('\r\n\r\n');
+const CRLF = Buffer.from('\r\n');
+
+/** Parse a CONNECT target into host/port, handling IPv6 literals like `[::1]:443`. */
+function parseConnectTarget(target: string): { host: string; port: number } | null {
+  const t = (target || '').trim();
+  if (!t) return null;
+  if (t.startsWith('[')) {
+    const close = t.indexOf(']');
+    if (close < 0) return null;
+    const host = t.slice(1, close);
+    const rest = t.slice(close + 1);
+    const port = rest.startsWith(':') ? Number(rest.slice(1)) : 443;
+    if (!host || !Number.isFinite(port) || port <= 0) return null;
+    return { host, port };
+  }
+  const lastColon = t.lastIndexOf(':');
+  if (lastColon < 0) return { host: t, port: 443 };
+  // A bare IPv6 literal (multiple colons, no brackets) has no parseable port — treat as host:443.
+  if (t.indexOf(':') !== lastColon) return { host: t, port: 443 };
+  const host = t.slice(0, lastColon);
+  const port = Number(t.slice(lastColon + 1));
+  if (!host || !Number.isFinite(port) || port <= 0) return null;
+  return { host, port };
+}
+
+/** Parse the request line + headers from a decoded HTTP head block. */
+function parseRequestHead(
+  headerBlock: string
+): { method: string; path: string; headers: Record<string, string> } | null {
+  const lines = headerBlock.split('\r\n');
+  const m = /^(\w+)\s+(\S+)\s+HTTP/i.exec(lines[0] || '');
+  if (!m) return null;
+  const headers: Record<string, string> = {};
+  for (let i = 1; i < lines.length; i++) {
+    const colon = lines[i]!.indexOf(':');
+    if (colon < 0) continue;
+    headers[lines[i]!.slice(0, colon).trim().toLowerCase()] = lines[i]!.slice(colon + 1).trim();
+  }
+  return { method: m[1]!, path: m[2]!, headers };
+}
+
+/**
+ * De-chunk a (possibly partial) HTTP/1.1 chunked body. `complete` is set once the terminal
+ * zero-length chunk is seen; until then the caller should keep buffering.
+ */
+function decodeChunkedBody(buf: Buffer): { body: Buffer; complete: boolean } {
+  const parts: Buffer[] = [];
+  let offset = 0;
+  while (offset < buf.length) {
+    const lineEnd = buf.indexOf(CRLF, offset);
+    if (lineEnd < 0) break;
+    const sizeStr = buf.subarray(offset, lineEnd).toString('latin1').split(';')[0]!.trim();
+    const size = parseInt(sizeStr, 16);
+    if (!Number.isFinite(size) || size < 0) break;
+    if (size === 0) return { body: Buffer.concat(parts), complete: true };
+    const dataStart = lineEnd + 2;
+    const dataEnd = dataStart + size;
+    if (dataEnd + 2 > buf.length) break; // need the chunk data + its trailing CRLF
+    parts.push(buf.subarray(dataStart, dataEnd));
+    offset = dataEnd + 2;
+  }
+  return { body: Buffer.concat(parts), complete: false };
+}
+
+/** Path portion of a URL for path-based traffic rules; falls back to the raw string on parse error. */
+function urlPath(fullUrl: string): string {
+  try {
+    const u = new URL(fullUrl);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    return fullUrl;
+  }
+}
+
+/** Merge a MockResponse's content-type into its header map (lowercased keys). */
+function mockHeaders(mock: MockResponse): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(mock.headers || {})) out[k.toLowerCase()] = v;
+  if (mock.contentType) out['content-type'] = mock.contentType;
+  return out;
+}
+
+/** Extension → MIME map for Map Local; used to infer a Content-Type when the mock leaves it blank. */
+const EXT_CONTENT_TYPES: Record<string, string> = {
+  '.json': 'application/json',
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.xml': 'application/xml',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.css': 'text/css',
+  '.txt': 'text/plain; charset=utf-8',
+  '.csv': 'text/csv',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.ts': 'video/mp2t',
+  '.m3u8': 'application/vnd.apple.mpegurl',
+  '.mpd': 'application/dash+xml',
+  '.mp3': 'audio/mpeg',
+  '.aac': 'audio/aac',
+  '.wav': 'audio/wav',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.pdf': 'application/pdf',
+  '.wasm': 'application/wasm',
+  '.bin': 'application/octet-stream'
+};
+
+/** Infer a Content-Type from a file's extension (Map Local), defaulting to application/octet-stream. */
+function inferContentType(filePath: string): string {
+  const dot = filePath.lastIndexOf('.');
+  const ext = dot >= 0 ? filePath.slice(dot).toLowerCase() : '';
+  return EXT_CONTENT_TYPES[ext] || 'application/octet-stream';
+}
+
+function newTransactionId(): string {
+  return `mitm-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function normalizeHeaders(raw: http.IncomingHttpHeaders): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value == null) continue;
+    out[key] = Array.isArray(value) ? value.join(', ') : String(value);
+  }
+  return out;
+}
+
+function stripHopByHop(headers: Record<string, string>): Record<string, string> {
+  const drop = new Set([
+    'connection',
+    'proxy-connection',
+    'keep-alive',
+    'transfer-encoding',
+    'te',
+    'trailer',
+    'upgrade',
+    'host',
+    'content-length'
+  ]);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!drop.has(k.toLowerCase())) out[k] = v;
+  }
+  return out;
+}
+
+function toClientResponseHeaders(
+  upstream: Record<string, string>,
+  bodyLength: number,
+  method: string
+): Record<string, string> {
+  const out = stripHopByHop(upstream);
+  if (method !== 'HEAD' && bodyLength > 0) {
+    out['content-length'] = String(bodyLength);
+  }
+  out.connection = 'close';
+  return out;
+}
+
+/**
+ * Serialize response header lines for the tunneled (HTTPS) path. Preserves multi-value headers
+ * (e.g. `set-cookie`) from the raw upstream headers, while honoring response rewrite ops: removed /
+ * overridden header names are dropped and re-added from the ops, and when the body was rewritten the
+ * stale `content-encoding` + `content-length` are replaced with the new (uncompressed) length.
+ * With no ops and no body change this reproduces the plain pass-through serialization.
+ */
+function serializeResponseHeaderLines(
+  raw: http.IncomingHttpHeaders,
+  resOps: RewriteOp[],
+  bodyReplaced: boolean,
+  newBodyLen: number
+): string {
+  const removed = new Set<string>();
+  const setters: Record<string, string> = {};
+  for (const op of resOps) {
+    if (op.type === 'remove-header' && op.match) removed.add(op.match.toLowerCase());
+    else if (op.type === 'set-header' && op.match) {
+      const k = op.match.toLowerCase();
+      removed.add(k);
+      setters[k] = op.value ?? '';
+    }
+  }
+  if (bodyReplaced) {
+    removed.add('content-encoding');
+    removed.add('content-length');
+  }
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(raw)) {
+    if (v == null || removed.has(k.toLowerCase())) continue;
+    const vals = Array.isArray(v) ? v : [v];
+    for (const vv of vals) lines.push(`${k}: ${vv}`);
+  }
+  for (const [k, v] of Object.entries(setters)) lines.push(`${k}: ${v}`);
+  if (bodyReplaced) lines.push(`content-length: ${newBodyLen}`);
+  return lines.join('\r\n');
+}
+
+function decodeRequestUrl(raw: string | undefined): string | undefined {
+  if (!raw) return raw;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function requestSnapshotFromIncoming(
+  req: http.IncomingMessage,
+  targetUrl: string
+): NetworkHttpMessage {
+  return {
+    method: req.method || 'GET',
+    url: targetUrl,
+    headers: normalizeHeaders(req.headers)
+  };
+}
+
+function readBody(req: http.IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Reads a response body up to `MAX_BODY_BYTES`. Returns the captured buffer plus a
+ * `truncated` flag. `truncated` is set whenever we hit the cap and destroy the stream —
+ * inferring truncation from final buffer length is unreliable because we stop *before*
+ * pushing the chunk that crosses the cap, so the final length can land just under it.
+ * A wrong flag matters for binary previews: a partial JPEG is undecodable, so the UI
+ * must show "truncated" rather than render a broken <img>.
+ */
+function readResponseBody(res: http.IncomingMessage): Promise<{ buffer: Buffer; truncated: boolean }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let done = false;
+    let truncated = false;
+    const settle = (fn: () => void): void => {
+      if (done) return;
+      done = true;
+      fn();
+    };
+    res.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
+        truncated = true;
+        res.destroy();
+        settle(() => resolve({ buffer: Buffer.concat(chunks), truncated }));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    res.on('end', () => settle(() => resolve({ buffer: Buffer.concat(chunks), truncated })));
+    res.on('error', (err) => settle(() => reject(err)));
+    // A destroyed/aborted upstream emits 'aborted'/'close' without a clean 'end'; resolve
+    // with whatever we have so the caller never hangs waiting on the body.
+    res.on('aborted', () => settle(() => resolve({ buffer: Buffer.concat(chunks), truncated })));
+    res.on('close', () => settle(() => resolve({ buffer: Buffer.concat(chunks), truncated })));
+  });
+}
+
+function bodyToText(buf: Buffer, headers: Record<string, string>): string {
+  if (!buf.length) return '';
+  const ct = headers['content-type'] || headers['Content-Type'] || '';
+  const charsetMatch = /charset=([^;\s]+)/i.exec(ct);
+  const charset = charsetMatch?.[1]?.replace(/['"]/g, '') || 'utf8';
+  try {
+    return buf.toString(charset as BufferEncoding);
+  } catch {
+    return buf.toString('utf8');
+  }
+}
+
+function contentTypeOf(headers: Record<string, string>): string {
+  return (headers['content-type'] || headers['Content-Type'] || '').toLowerCase();
+}
+
+/** Textual payloads are charset-decoded; everything else is preserved as raw bytes (base64). */
+function isTextualContentType(ct: string): boolean {
+  if (!ct) return true; // unknown → assume text (matches previous behavior)
+  if (ct.startsWith('text/')) return true;
+  return /(json|xml|javascript|ecmascript|graphql|csv|x-www-form-urlencoded|svg)/.test(ct);
+}
+
+// Cap on the *decompressed* size we materialize for the Inspector snapshot. The capture cap
+// (`MAX_BODY_BYTES`) bounds the compressed bytes; this bounds the inflated copy so a highly
+// compressible (or maliciously crafted) response can't balloon renderer memory. Past this the
+// decode is skipped and the raw bytes are kept (shown as base64 / marked truncated).
+const MAX_DECODED_BODY_BYTES = 16_000_000;
+
+const DECODE_OPTS = { maxOutputLength: MAX_DECODED_BODY_BYTES } as const;
+// Codecs we know how to undo. A chain containing anything else is left raw (we can't safely peel
+// past an unknown layer to reach the inner content).
+const KNOWN_ENCODINGS = new Set(['gzip', 'x-gzip', 'br', 'deflate', 'identity']);
+
+/** Undo a single content coding. Throws on corrupt/truncated input (caller catches). */
+function decodeOneEncoding(buf: Buffer, codec: string): Buffer {
+  switch (codec) {
+    case 'br':
+      return zlib.brotliDecompressSync(buf, DECODE_OPTS);
+    case 'gzip':
+    case 'x-gzip':
+      return zlib.gunzipSync(buf, DECODE_OPTS);
+    case 'deflate':
+      // zlib-wrapped first; fall back to raw DEFLATE (some servers omit the zlib header).
+      try {
+        return zlib.inflateSync(buf, DECODE_OPTS);
+      } catch {
+        return zlib.inflateRawSync(buf, DECODE_OPTS);
+      }
+    default: // 'identity'
+      return buf;
+  }
+}
+
+/**
+ * Decompress a captured body for *display* per its `Content-Encoding` (gzip / br / deflate),
+ * including stacked encodings ("gzip, br"). Codings are listed in the order applied, so we undo
+ * them outermost-first (right to left). The proxy forwards the original compressed bytes to the
+ * device untouched — this only affects the snapshot the Network Inspector shows, mirroring what a
+ * browser renders. Decompression is best-effort: a truncated capture, an unknown codec anywhere in
+ * the chain, or oversized inflation falls back to the raw bytes so we never throw on the response
+ * path.
+ */
+function decodeContentEncoding(
+  buf: Buffer,
+  headers: Record<string, string>
+): { buffer: Buffer; decoded: boolean } {
+  const enc = (headers['content-encoding'] || headers['Content-Encoding'] || '').toLowerCase().trim();
+  if (!enc || enc === 'identity' || !buf.length) return { buffer: buf, decoded: false };
+  const codecs = enc.split(',').map((c) => c.trim()).filter(Boolean);
+  // Any unknown coding in the chain → keep the raw bytes; a partially-peeled body would be
+  // mislabeled as decoded text.
+  if (codecs.some((c) => !KNOWN_ENCODINGS.has(c))) return { buffer: buf, decoded: false };
+  let current = buf;
+  let decoded = false;
+  try {
+    for (const codec of codecs.reverse()) {
+      if (codec === 'identity') continue;
+      current = decodeOneEncoding(current, codec);
+      decoded = true;
+    }
+  } catch {
+    return { buffer: buf, decoded: false };
+  }
+  return { buffer: current, decoded };
+}
+
+/** Encode a captured body: text via charset, binary (images/video/etc.) as base64. */
+function encodeBody(
+  buf: Buffer,
+  headers: Record<string, string>,
+  hitCap: boolean
+): Pick<NetworkHttpMessage, 'body' | 'bodyEncoding' | 'bodyTruncated'> {
+  if (!buf.length) return {};
+  const truncated = hitCap ? { bodyTruncated: true } : {};
+  // Decompress for display so gzip/br/deflate responses (e.g. tiqcdn's utag.js) read as the real
+  // text/asset instead of raw compressed bytes. The forwarded body is unaffected.
+  const { buffer: decoded } = decodeContentEncoding(buf, headers);
+  if (isTextualContentType(contentTypeOf(headers))) {
+    return { body: bodyToText(decoded, headers), bodyEncoding: 'text', ...truncated };
+  }
+  return { body: decoded.toString('base64'), bodyEncoding: 'base64', ...truncated };
+}
+
+/**
+ * Syntactically-valid DNS hostname (RFC 1123-ish, labels of letters/digits/hyphen, ≤253 chars).
+ * Used to reject garbage/empty SNI values so the proxy only mints leaf certs for real hostnames.
+ */
+function isValidSniHostname(name: string | undefined | null): name is string {
+  if (typeof name !== 'string' || name.length === 0 || name.length > 253) return false;
+  return /^([a-zA-Z0-9_](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9_])?\.)*[a-zA-Z0-9_](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9_])?$/.test(
+    name
+  );
+}
+
+/**
+ * Wall-clock timestamps stamped as the RDS→upstream request progresses, later reduced to per-phase
+ * durations by {@link computePhases}. All are `number | undefined`; an event that never fires (e.g. a
+ * reused keep-alive socket emits no `lookup`/`connect`/`secureConnect`) simply leaves its mark unset,
+ * so the corresponding phase is omitted rather than shown as a misleading 0 ms.
+ */
+type UpstreamMarks = {
+  socketAt?: number;
+  lookupAt?: number;
+  connectAt?: number;
+  secureConnectAt?: number;
+  sentAt?: number;
+  headersAt?: number;
+  firstByteAt?: number;
+  lastByteAt?: number;
+};
+
+/**
+ * Attach best-effort socket/request listeners to the outbound upstream request to stamp connection
+ * and response milestones into `m`. Failure-safe: only fresh sockets (`connecting !== false`) get the
+ * DNS/connect/TLS listeners, so a keep-alive-reused socket (already connected, no such events) never
+ * yields phantom phases; any milestone that doesn't fire is simply left unmeasured. Never throws and
+ * never alters forwarding — it only observes. The second `res.on('data')` listener is safe because
+ * the response body reader already puts the stream in flowing mode.
+ */
+function instrumentUpstream(req: http.ClientRequest, m: UpstreamMarks): void {
+  const now = (): number => Date.now();
+  req.once('socket', (s: net.Socket) => {
+    m.socketAt = now();
+    // A fresh socket is still connecting; a reused keep-alive socket is already connected and will
+    // emit none of these — guard so we don't wait on events that never come.
+    if ((s as unknown as { connecting?: boolean }).connecting !== false) {
+      s.once('lookup', () => {
+        m.lookupAt = now();
+      });
+      s.once('connect', () => {
+        m.connectAt = now();
+      });
+      s.once('secureConnect', () => {
+        m.secureConnectAt = now();
+      });
+    }
+  });
+  req.once('finish', () => {
+    m.sentAt = now();
+  });
+  req.once('response', (res: http.IncomingMessage) => {
+    m.headersAt = now();
+    res.on('data', () => {
+      if (m.firstByteAt == null) m.firstByteAt = now();
+    });
+    res.once('end', () => {
+      m.lastByteAt = now();
+    });
+    res.once('close', () => {
+      if (m.lastByteAt == null) m.lastByteAt = now();
+    });
+  });
+}
+
+/**
+ * Reduce raw {@link UpstreamMarks} to per-phase millisecond durations. Each phase is only emitted
+ * when both endpoints were stamped, so unmeasured phases (plain-HTTP → no TLS; keep-alive reuse →
+ * no DNS/Connect/TLS; HEAD → no Download) are omitted rather than reported as 0. Returns `undefined`
+ * when nothing could be measured, so the caller leaves `timing` off the transaction entirely.
+ */
+function computePhases(m: UpstreamMarks): NetworkTimingPhases | undefined {
+  const clamp = (a?: number, b?: number): number | undefined =>
+    a != null && b != null ? Math.max(0, b - a) : undefined;
+  const p: NetworkTimingPhases = {};
+  const dns = clamp(m.socketAt, m.lookupAt);
+  if (dns != null) p.dnsMs = dns;
+  const con = clamp(m.lookupAt ?? m.socketAt, m.connectAt);
+  if (con != null) p.connectMs = con;
+  const tls = clamp(m.connectAt, m.secureConnectAt);
+  if (tls != null) p.tlsMs = tls;
+  const snd = clamp(m.secureConnectAt ?? m.connectAt ?? m.socketAt, m.sentAt);
+  if (snd != null) p.sendMs = snd;
+  const wt = clamp(m.sentAt, m.headersAt);
+  if (wt != null) p.waitMs = wt;
+  const rcv = clamp(m.firstByteAt ?? m.headersAt, m.lastByteAt ?? m.firstByteAt ?? m.headersAt);
+  if (rcv != null) p.receiveMs = rcv;
+  return Object.keys(p).length ? p : undefined;
+}
+
+export class RokuMitmProxy {
+  private server: http.Server | null = null;
+  private readonly leafCache = new Map<string, { certPem: string; keyPem: string }>();
+  private running = false;
+  private lastError: string | undefined;
+  private readonly opts: MitmProxyOptions;
+  // Lazy: only spawned once the first not-yet-cached hostname is actually seen, not at construction.
+  private leafCertPool: WorkerPool<string, { certPem: string; keyPem: string }> | null = null;
+
+  constructor(opts: MitmProxyOptions) {
+    this.opts = opts;
+  }
+
+  isRunning(): boolean {
+    return !!(this.server?.listening || this.running);
+  }
+
+  getLastError(): string | undefined {
+    return this.lastError;
+  }
+
+  start(): boolean {
+    if (this.server) return true;
+    this.lastError = undefined;
+    try {
+      this.server = http.createServer((req, res) => {
+        void this.handleHttp(req, res).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.failClient(req, res, msg, 500);
+        });
+      });
+      this.server.on('connect', (req, clientSocket, head) => {
+        void this.handleConnect(req, clientSocket as net.Socket, head);
+      });
+      this.server.on('error', (err) => {
+        this.lastError = err.message;
+        this.running = false;
+        const srv = this.server;
+        this.server = null;
+        srv?.close();
+        // Notify the owner of the (often asynchronous) listen failure — e.g. EADDRINUSE when the
+        // configured port is already taken — so it can resolve the offending process and warn.
+        this.opts.onError?.(err.message);
+        this.opts.onListening?.();
+      });
+      // Always bind to every interface so the proxy is reachable whether the Roku is on the same
+      // Wi-Fi as this machine (LAN IP) or connected to this machine's hotspot (gateway IP). The
+      // private-client gate in handleHttp/handleConnect is what restricts who may proxy — not the
+      // bind address. Binding to a single gateway IP previously made the proxy unreachable for the
+      // other topology.
+      this.server.listen(this.opts.port, '0.0.0.0', () => {
+        this.running = true;
+        this.opts.onListening?.();
+      });
+      return true;
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  }
+
+  stop(): void {
+    if (!this.server) return;
+    const srv = this.server;
+    this.server = null;
+    this.running = false;
+    // Release per-host leaf certs so a stop/start cycle doesn't leak them for the process lifetime.
+    this.leafCache.clear();
+    // Terminate the signing thread rather than leave it idle for the process lifetime; re-spawned
+    // lazily on the next cache miss after a restart.
+    void this.leafCertPool?.destroy();
+    this.leafCertPool = null;
+    srv.close();
+  }
+
+  private clientIp(req: http.IncomingMessage): string {
+    const sock = req.socket;
+    const remote = sock.remoteAddress || '';
+    if (remote.startsWith('::ffff:')) return remote.slice(7);
+    return remote;
+  }
+
+  /**
+   * The proxy's own `host:port` as this client reached it, for the "Proxy URL" hint. Prefers the
+   * address the device actually addressed (Host header), then the local end of the socket, then the
+   * configured hotspot gateway. `gatewayIp` is only set in hotspot mode, so on same-Wi-Fi it's empty
+   * — without these fallbacks the hint collapsed to `:PORT` with no host. Returns '' if none resolve.
+   */
+  private proxySelfHostPort(req: http.IncomingMessage): string {
+    const withPort = (hostOrIp: string): string => {
+      const h = hostOrIp.trim();
+      if (!h) return '';
+      return /:\d+$/.test(h) ? h : `${h}:${this.opts.port}`;
+    };
+    const fromHost = normalizeProxyHostPort(req.headers.host || '');
+    if (fromHost && !fromHost.startsWith(':')) return withPort(fromHost);
+    const localRaw = req.socket.localAddress || '';
+    const localIp = localRaw.startsWith('::ffff:') ? localRaw.slice(7) : localRaw;
+    if (localIp) return withPort(localIp);
+    if (this.opts.gatewayIp) return `${this.opts.gatewayIp}:${this.opts.port}`;
+    return '';
+  }
+
+  private emitTransaction(
+    transactionId: string,
+    deviceIp: string,
+    hostname: string,
+    destPort: number | undefined,
+    request: NetworkHttpMessage,
+    response: NetworkHttpMessage,
+    startedAtMs?: number,
+    timing?: NetworkTimingPhases
+  ): void {
+    // The genuine "Pending → terminal" HTTP path passes `startedAtMs` on both emits, so duration is
+    // computed directly from it. One-shot emits (reset/blocked/mock/error/TLS-fail) omit it and have
+    // no duration — and, crucially, no longer record a per-id start that would leak (the socket is
+    // destroyed with no terminal emit to release it).
+    const durationMs =
+      response.statusCode === 0 || startedAtMs == null
+        ? undefined
+        : Math.max(0, Date.now() - startedAtMs);
+    this.opts.onTransaction({
+      transactionId,
+      deviceIp,
+      timestamp: startedAtMs != null ? new Date(startedAtMs).toISOString() : new Date().toISOString(),
+      hostname,
+      destPort,
+      request,
+      response,
+      durationMs,
+      timing
+    });
+  }
+
+  private failClient(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    message: string,
+    statusCode: number
+  ): void {
+    const deviceIp = this.clientIp(req);
+    const rawUrl = decodeRequestUrl(req.url);
+    const rokuTarget = parseRokuProxyTarget(rawUrl);
+    const targetUrl = rokuTarget?.originalUrl || rawUrl || req.url || '';
+    const host = rokuTarget?.hostname || 'proxy';
+    const port = rokuTarget?.port ?? this.opts.port;
+    this.emitTransaction(newTransactionId(), deviceIp, host, port, requestSnapshotFromIncoming(req, targetUrl), {
+      statusCode,
+      statusText: statusCode === 500 ? 'Proxy Error' : 'Error',
+      body: message
+    });
+    if (!res.headersSent) {
+      res.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8', Connection: 'close' });
+      res.end(message);
+    } else {
+      try {
+        res.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private respondPlain(res: http.ServerResponse, statusCode: number, body: string): void {
+    if (res.headersSent) return;
+    res.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8', Connection: 'close' });
+    res.end(body);
+  }
+
+  private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const deviceIp = this.clientIp(req);
+    const rawUrl = decodeRequestUrl(req.url);
+    if (!this.opts.isHotspotClient(deviceIp)) {
+      const targetUrl = parseRokuProxyTarget(rawUrl)?.originalUrl || rawUrl || '';
+      this.emitTransaction(newTransactionId(), deviceIp, 'proxy', this.opts.port, requestSnapshotFromIncoming(req, targetUrl), {
+        statusCode: 403,
+        statusText: 'Forbidden',
+        body: `RDS proxy rejected client ${deviceIp || '(unknown)'} — local/private network clients only`
+      });
+      this.respondPlain(res, 403, 'RDS Network Inspector proxy: local/private network clients only');
+      return;
+    }
+
+    const rokuTarget = parseRokuProxyTarget(rawUrl);
+    if (rokuTarget) {
+      await this.forwardRokuRequest(req, res, deviceIp, rokuTarget);
+      return;
+    }
+
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const proxyHint = this.proxySelfHostPort(req);
+      this.respondPlain(
+        res,
+        200,
+        'Roku Engineer Studio MITM proxy.\n' +
+          `Proxy URL: http://${proxyHint || 'GATEWAY_IP:PORT'}/;https://original-host/path`
+      );
+      return;
+    }
+
+    if (rawUrl && /^https?:\/\/https?:\/\//i.test(rawUrl)) {
+      this.failClient(
+        req,
+        res,
+        'Malformed proxy URL (double http://). Use host:port only (e.g. 192.168.2.1:8888) — do not include http://.',
+        400
+      );
+      return;
+    }
+
+    this.failClient(
+      req,
+      res,
+      `Unsupported request — use Roku proxy URL format: /;https://host/path (got ${rawUrl || '(empty)'})`,
+      400
+    );
+  }
+
+  private decisionFor(deviceIp: string, hostname: string, path = ''): TrafficDecision {
+    return this.opts.getTrafficDecision
+      ? this.opts.getTrafficDecision(deviceIp, hostname, path)
+      : { block: false };
+  }
+
+  /**
+   * Resolve a mock's response body + headers, reading a Map Local `filePath` from disk when set
+   * (read-per-request, so live edits are served). Content-Type is inferred from the file extension
+   * only when the mock leaves it blank. Never throws: a missing/unreadable file is surfaced as
+   * `error` (the caller serves/records an HTTP 502 "Map Local Failed" instead).
+   */
+  private async resolveMockBody(
+    mock: MockResponse
+  ): Promise<{ bodyBuf: Buffer; headers: Record<string, string>; error?: string }> {
+    const headers = mockHeaders(mock);
+    const filePath = (mock.filePath || '').trim();
+    if (!filePath) return { bodyBuf: Buffer.from(mock.body || '', 'utf8'), headers };
+    try {
+      const bodyBuf = await fs.promises.readFile(filePath);
+      if (!headers['content-type']) headers['content-type'] = inferContentType(filePath);
+      return { bodyBuf, headers };
+    } catch (err) {
+      return { bodyBuf: Buffer.alloc(0), headers, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Write a canned mock response to a plain HTTP client response (request mocking). */
+  private respondMockHttp(
+    res: http.ServerResponse,
+    method: string,
+    mock: MockResponse,
+    throttle: TrafficThrottle | undefined,
+    resolved: { bodyBuf: Buffer; headers: Record<string, string>; error?: string }
+  ): void {
+    if (resolved.error) {
+      this.respondPlain(res, 502, `Map Local: ${resolved.error}`);
+      return;
+    }
+    const headers = resolved.headers;
+    const bodyBuf = resolved.bodyBuf;
+    const send = (): void => {
+      if (res.headersSent) {
+        try { res.end(); } catch { /* ignore */ }
+        return;
+      }
+      const clientHeaders = toClientResponseHeaders(headers, bodyBuf.length, method);
+      res.writeHead(mock.statusCode, mock.statusText || undefined, clientHeaders);
+      if (method !== 'HEAD' && bodyBuf.length && throttleIsActive(throttle)) {
+        writeBodyThrottled((c) => { res.write(c); }, () => { res.end(); }, bodyBuf, throttle as TrafficThrottle);
+      } else {
+        if (method !== 'HEAD' && bodyBuf.length) res.write(bodyBuf);
+        res.end();
+      }
+    };
+    if (mock.delayMs && mock.delayMs > 0) setTimeout(send, mock.delayMs);
+    else send();
+  }
+
+  /** Build the response snapshot recorded for a mock (so the Inspector shows the canned response). */
+  private mockResponseSnapshot(
+    mock: MockResponse,
+    resolved: { bodyBuf: Buffer; headers: Record<string, string>; error?: string }
+  ): NetworkHttpMessage {
+    if (resolved.error) {
+      return { statusCode: 502, statusText: 'Map Local Failed', body: `Map Local: ${resolved.error}` };
+    }
+    const headers = resolved.headers;
+    const bodyBuf = resolved.bodyBuf;
+    return {
+      statusCode: mock.statusCode,
+      statusText: mock.statusText || 'Mocked',
+      headers,
+      ...encodeBody(bodyBuf, headers, false)
+    };
+  }
+
+  private async forwardRokuRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    deviceIp: string,
+    target: ReturnType<typeof parseRokuProxyTarget>
+  ): Promise<void> {
+    if (!target) return;
+    const method = req.method || 'GET';
+    const reqHeaders = normalizeHeaders(req.headers);
+    let outboundHeaders = stripHopByHop(reqHeaders); // host set after request rewrites, below
+
+    // Apply per-device/host traffic rules. Block / mock / reset short-circuit before touching the
+    // upstream; throttle is applied when writing the response below.
+    const decisionPort = target.port ?? (target.scheme === 'https' ? 443 : 80);
+    const decision = this.decisionFor(deviceIp, target.hostname, urlPath(target.originalUrl));
+    if (decision.block) {
+      this.emitTransaction(
+        newTransactionId(),
+        deviceIp,
+        target.hostname,
+        decisionPort,
+        requestSnapshotFromIncoming(req, target.originalUrl),
+        { statusCode: 403, statusText: 'Blocked by RDS', body: 'Blocked by Roku Engineer Studio traffic rules' }
+      );
+      this.respondPlain(res, 403, 'Blocked by Roku Engineer Studio traffic rules');
+      return;
+    }
+    if (decision.resetConnection) {
+      this.emitTransaction(
+        newTransactionId(),
+        deviceIp,
+        target.hostname,
+        decisionPort,
+        requestSnapshotFromIncoming(req, target.originalUrl),
+        { statusCode: 0, statusText: 'Connection reset (RDS fault)', body: 'Connection reset by Roku Engineer Studio traffic rule' }
+      );
+      try { req.socket.destroy(); } catch { /* ignore */ }
+      return;
+    }
+    if (decision.respond) {
+      const resolved = await this.resolveMockBody(decision.respond);
+      this.emitTransaction(
+        newTransactionId(),
+        deviceIp,
+        target.hostname,
+        decisionPort,
+        requestSnapshotFromIncoming(req, target.originalUrl),
+        this.mockResponseSnapshot(decision.respond, resolved)
+      );
+      this.respondMockHttp(res, method, decision.respond, decision.throttle, resolved);
+      return;
+    }
+
+    let reqBody: Buffer = Buffer.alloc(0);
+    if (method !== 'GET' && method !== 'HEAD') {
+      try {
+        reqBody = await readBody(req);
+      } catch {
+        this.emitTransaction(newTransactionId(), deviceIp, target.hostname, target.port ?? 443, requestSnapshotFromIncoming(req, target.originalUrl), {
+          statusCode: 413,
+          statusText: 'Payload Too Large',
+          body: 'Request body too large'
+        });
+        this.respondPlain(res, 413, 'Request body too large');
+        return;
+      }
+    }
+
+    // Request-side rewrites (host / path / query / header / body). The decision was matched on the
+    // ORIGINAL URL above; here we mutate what actually goes upstream ("map remote", header edits, …).
+    const reqOps = opsFor(decision.rewrite, 'request');
+    let effUrl = target.originalUrl;
+    let effHost = target.hostname;
+    let effScheme = target.scheme;
+    let effPort = target.port ?? (target.scheme === 'https' ? 443 : 80);
+    let effPath = target.path;
+    if (reqOps.length) {
+      // Only re-serialize the URL when an op actually mutates it. Header-only rewrites (e.g. the
+      // device presets) leave the target untouched, so skip the new URL().toString() normalization.
+      if (hasUrlRewrite(reqOps)) {
+        effUrl = applyRequestUrl(reqOps, target.originalUrl);
+        try {
+          const eu = new URL(effUrl);
+          effHost = eu.hostname;
+          effScheme = eu.protocol === 'https:' ? 'https' : 'http';
+          effPort = eu.port ? Number(eu.port) : effScheme === 'https' ? 443 : 80;
+          effPath = `${eu.pathname}${eu.search}`;
+        } catch {
+          /* unparseable rewrite result — keep the original target parts */
+        }
+      }
+      outboundHeaders = applyHeaderOps(reqOps, outboundHeaders);
+      if (hasBodyReplace(reqOps) && reqBody.length && isTextualContentType(contentTypeOf(reqHeaders))) {
+        const { buffer: decoded } = decodeContentEncoding(reqBody, reqHeaders);
+        reqBody = Buffer.from(applyBodyReplace(reqOps, bodyToText(decoded, reqHeaders)), 'utf8');
+        delete outboundHeaders['content-encoding'];
+      }
+    }
+    outboundHeaders.host = effHost;
+
+    const port = effPort;
+    const requestSnapshot: NetworkHttpMessage = {
+      method,
+      url: effUrl,
+      headers: reqHeaders,
+      ...encodeBody(reqBody, reqHeaders, false)
+    };
+
+    const transactionId = newTransactionId();
+    const startedAtMs = Date.now();
+
+    // Record immediately so the Network Inspector shows the request even if upstream fails.
+    this.emitTransaction(transactionId, deviceIp, effHost, port, requestSnapshot, {
+      statusCode: 0,
+      statusText: 'Pending',
+      body: undefined
+    }, startedAtMs);
+
+    const mod = effScheme === 'https' ? https : http;
+
+    // Per-phase timing marks for the RDS→origin leg, stamped by instrumentUpstream() below and
+    // reduced to durations for the Overview waterfall on the terminal emit.
+    const marks: UpstreamMarks = {};
+
+    // Guarantee exactly one outcome per transaction. Without this guard a late socket
+    // 'error'/'timeout' after a successful response would re-emit and flip a completed
+    // request's status, and a stall could leave it "Pending" forever.
+    let settled = false;
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (responseSnapshot: NetworkHttpMessage, statusCode: number, body: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      if (hardTimer) {
+        clearTimeout(hardTimer);
+        hardTimer = null;
+      }
+      this.emitTransaction(transactionId, deviceIp, effHost, port, requestSnapshot, responseSnapshot, startedAtMs, computePhases(marks));
+      if (res.headersSent) {
+        try {
+          res.end();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      try {
+        const clientHeaders = toClientResponseHeaders(
+          responseSnapshot.headers || {},
+          body.length,
+          method
+        );
+        res.writeHead(statusCode, clientHeaders);
+        if (method !== 'HEAD' && body.length && throttleIsActive(decision.throttle)) {
+          writeBodyThrottled(
+            (c) => { res.write(c); },
+            () => { res.end(); },
+            body,
+            decision.throttle as TrafficThrottle
+          );
+        } else {
+          if (method !== 'HEAD' && body.length) res.write(body);
+          res.end();
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.respondPlain(res, 502, msg);
+      }
+    };
+
+    await new Promise<void>((resolve) => {
+      const upstream = mod.request(
+        {
+          hostname: effHost,
+          port,
+          path: effPath,
+          method,
+          headers: outboundHeaders,
+          timeout: REQUEST_TIMEOUT_MS,
+          servername: effScheme === 'https' ? effHost : undefined
+        },
+        async (upstreamRes) => {
+          try {
+            const resOps = opsFor(decision.rewrite, 'response');
+            const resHeaders0 = normalizeHeaders(upstreamRes.headers);
+            const read =
+              method === 'HEAD'
+                ? { buffer: Buffer.alloc(0), truncated: false }
+                : await readResponseBody(upstreamRes);
+            // Response-side rewrites (status / header / body). Body-replace decodes gzip/br, edits the
+            // text, and drops content-encoding so the (now-plain) body is sent with a correct length.
+            let resBody = read.buffer;
+            let resHeaders = resHeaders0;
+            let effStatus = upstreamRes.statusCode ?? 502;
+            if (resOps.length) {
+              const st = statusOverride(resOps);
+              if (st !== undefined) effStatus = st;
+              resHeaders = applyHeaderOps(resOps, resHeaders0);
+              if (hasBodyReplace(resOps) && resBody.length && isTextualContentType(contentTypeOf(resHeaders0))) {
+                const { buffer: decoded } = decodeContentEncoding(resBody, resHeaders0);
+                resBody = Buffer.from(applyBodyReplace(resOps, bodyToText(decoded, resHeaders0)), 'utf8');
+                delete resHeaders['content-encoding'];
+              }
+            }
+            const responseSnapshot: NetworkHttpMessage = {
+              statusCode: effStatus,
+              statusText: upstreamRes.statusMessage,
+              headers: resHeaders,
+              ...encodeBody(resBody, resHeaders, read.truncated)
+            };
+            finish(responseSnapshot, effStatus, resBody);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            finish(
+              { statusCode: 502, statusText: 'Bad Gateway', body: msg },
+              502,
+              Buffer.from(msg, 'utf8')
+            );
+          }
+          resolve();
+        }
+      );
+
+      // Attach timing listeners in the same tick as the request so the first-byte 'data' handler is
+      // registered before the body starts flowing. Never alters forwarding (observe-only).
+      instrumentUpstream(upstream, marks);
+
+      // Absolute backstop independent of socket-level events: always resolves the pending
+      // transaction even if neither 'response', 'error', nor 'timeout' ever fires.
+      hardTimer = setTimeout(() => {
+        const msg = 'Upstream did not respond in time';
+        try {
+          upstream.destroy();
+        } catch {
+          /* ignore */
+        }
+        finish({ statusCode: 504, statusText: 'Gateway Timeout', body: msg }, 504, Buffer.from(msg, 'utf8'));
+        resolve();
+      }, HARD_TIMEOUT_MS);
+
+      upstream.on('timeout', () => {
+        upstream.destroy();
+        const msg = 'Upstream request timed out';
+        finish({ statusCode: 504, statusText: 'Gateway Timeout', body: msg }, 504, Buffer.from(msg, 'utf8'));
+        resolve();
+      });
+
+      upstream.on('error', (err) => {
+        const msg = err.message;
+        finish({ statusCode: 502, statusText: 'Bad Gateway', body: msg }, 502, Buffer.from(msg, 'utf8'));
+        resolve();
+      });
+
+      // If the device closes the connection before the response completes, abort the upstream
+      // request immediately instead of letting it run to completion (or the hard-timeout backstop) —
+      // otherwise an aborted stream leaks an upstream socket per disconnect. `finish` is idempotent
+      // (`settled`), so on a normal completion this close fires after finish() and is a no-op.
+      const onClientGone = () => {
+        if (settled) return;
+        try {
+          upstream.destroy();
+        } catch {
+          /* ignore */
+        }
+        finish({ statusCode: 499, statusText: 'Client Closed Request', body: '' }, 499, Buffer.alloc(0));
+        resolve();
+      };
+      req.on('close', onClientGone);
+
+      if (reqBody.length) upstream.write(reqBody);
+      upstream.end();
+    });
+  }
+
+  /** One thread is enough — this only runs on a cache miss (once per unique hostname up to
+   *  `MAX_LEAF_CACHE`), never per-request, so call volume is inherently low. */
+  private getLeafCertPool(): WorkerPool<string, { certPem: string; keyPem: string }> {
+    if (!this.leafCertPool) {
+      this.leafCertPool = createWorkerPool<string, { certPem: string; keyPem: string }>({
+        workerFile: path.join(__dirname, 'leaf-cert.worker.js'),
+        workerData: this.opts.ca,
+        poolSize: 1
+      });
+    }
+    return this.leafCertPool;
+  }
+
+  private async getLeafAsync(hostname: string): Promise<{ certPem: string; keyPem: string }> {
+    const existing = this.leafCache.get(hostname);
+    if (existing) {
+      // Refresh recency: re-insert so this host becomes most-recently-used (Map keeps insert order).
+      this.leafCache.delete(hostname);
+      this.leafCache.set(hostname, existing);
+      return existing;
+    }
+    // Note: two connections to the same brand-new hostname arriving before either resolves will
+    // both miss the cache and both sign a cert for it — harmless (each is independently valid; the
+    // second write just wins), not worth coalescing for what's already a rare, low-volume path.
+    const leaf = await this.getLeafCertPool().run(hostname);
+    this.leafCache.set(hostname, leaf);
+    // Evict the least-recently-used entry once the cache grows past its cap.
+    if (this.leafCache.size > MAX_LEAF_CACHE) {
+      const oldest = this.leafCache.keys().next().value;
+      if (oldest !== undefined) this.leafCache.delete(oldest);
+    }
+    return leaf;
+  }
+
+  private async handleConnect(
+    req: http.IncomingMessage,
+    clientSocket: net.Socket,
+    head: Buffer
+  ): Promise<void> {
+    const deviceIp = this.clientIp(req);
+    if (!this.opts.isHotspotClient(deviceIp)) {
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+
+    const parsedTarget = parseConnectTarget(req.url || '');
+    if (!parsedTarget) {
+      clientSocket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+    const { host: hostname, port } = parsedTarget;
+
+    const leaf = await this.getLeafAsync(hostname);
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+    const secureSocket = new tls.TLSSocket(clientSocket, {
+      isServer: true,
+      key: leaf.keyPem,
+      cert: leaf.certPem,
+      SNICallback: (servername, cb) => {
+        // Only mint a leaf for a syntactically valid hostname; for empty/garbage SNI reuse the
+        // CONNECT-target leaf. With the hotspot-client gate on CONNECT above, this keeps the proxy
+        // from being coaxed into signing certificates for arbitrary names and bounds cache churn.
+        const target = isValidSniHostname(servername) ? servername : hostname;
+        // Node's SNICallback explicitly tolerates calling `cb` asynchronously (not same-tick).
+        this.getLeafAsync(target)
+          .then((snLeaf) => {
+            cb(null, tls.createSecureContext({ key: snLeaf.keyPem, cert: snLeaf.certPem }));
+          })
+          .catch((err) => {
+            cb(err instanceof Error ? err : new Error(String(err)));
+          });
+      }
+    });
+
+    secureSocket.on('error', () => {
+      secureSocket.destroy();
+    });
+
+    if (head.length) secureSocket.write(head);
+
+    secureSocket.once('data', (firstChunk) => {
+      void this.interceptTlsHttp(deviceIp, hostname, port, secureSocket, firstChunk);
+    });
+  }
+
+  /**
+   * Collect a full HTTP/1.1 request off the decrypted TLS socket, honoring Content-Length and
+   * chunked transfer-encoding so large or split request bodies aren't truncated, then forward it.
+   * A hard timeout guarantees the tunnel never hangs waiting for a body that never finishes.
+   */
+  private interceptTlsHttp(
+    deviceIp: string,
+    hostname: string,
+    port: number,
+    socket: tls.TLSSocket,
+    firstChunk: Buffer
+  ): void {
+    const chunks: Buffer[] = firstChunk.length ? [firstChunk] : [];
+    let handled = false;
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = (): void => {
+      if (hardTimer) {
+        clearTimeout(hardTimer);
+        hardTimer = null;
+      }
+      socket.removeListener('data', onData);
+    };
+
+    const forward = (
+      method: string,
+      pathPart: string,
+      hdrs: Record<string, string>,
+      reqBodyBuf: Buffer,
+      bodyTruncated: boolean
+    ): void => {
+      if (handled) return;
+      handled = true;
+      cleanup();
+      this.forwardTunneledRequest(deviceIp, hostname, port, socket, method, pathPart, hdrs, reqBodyBuf, bodyTruncated);
+    };
+
+    const tryParse = (): void => {
+      if (handled) return;
+      const buf = Buffer.concat(chunks);
+      const sep = buf.indexOf(HEADER_SEP);
+      if (sep < 0) {
+        // Headers not complete yet; bail out (drop) if the head grows unreasonably large.
+        if (buf.length > MAX_REQUEST_HEADER_BYTES) {
+          handled = true;
+          cleanup();
+          try { socket.destroy(); } catch { /* ignore */ }
+        }
+        return;
+      }
+      const head = parseRequestHead(buf.subarray(0, sep).toString('latin1'));
+      if (!head) {
+        handled = true;
+        cleanup();
+        try { socket.destroy(); } catch { /* ignore */ }
+        return;
+      }
+      const bodyStart = sep + HEADER_SEP.length;
+      const available = buf.subarray(bodyStart);
+      const noBodyMethod = head.method === 'GET' || head.method === 'HEAD';
+      const isChunked = /chunked/i.test(head.headers['transfer-encoding'] || '');
+      const clRaw = head.headers['content-length'];
+      const contentLength = clRaw != null && /^\d+$/.test(clRaw.trim()) ? parseInt(clRaw.trim(), 10) : undefined;
+
+      if (isChunked && !noBodyMethod) {
+        const { body, complete } = decodeChunkedBody(available);
+        if (!complete && available.length < MAX_BODY_BYTES) return; // wait for more chunks
+        const capped = body.subarray(0, MAX_BODY_BYTES);
+        forward(head.method, head.path, head.headers, capped, !complete || body.length > MAX_BODY_BYTES);
+        return;
+      }
+      if (contentLength != null && !noBodyMethod) {
+        const need = Math.min(contentLength, MAX_BODY_BYTES);
+        if (available.length < need) return; // wait for the rest of the declared body
+        forward(head.method, head.path, head.headers, available.subarray(0, need), contentLength > MAX_BODY_BYTES);
+        return;
+      }
+      // No Content-Length / chunked (or a body-less method): forward immediately.
+      forward(
+        head.method,
+        head.path,
+        head.headers,
+        noBodyMethod ? Buffer.alloc(0) : available.subarray(0, MAX_BODY_BYTES),
+        false
+      );
+    };
+
+    const onData = (chunk: Buffer): void => {
+      if (handled) return;
+      chunks.push(chunk);
+      tryParse();
+    };
+
+    // Hard backstop: if the request head/body never completes, forward whatever arrived (marked
+    // truncated) or drop the tunnel rather than leaving the socket open forever.
+    hardTimer = setTimeout(() => {
+      if (handled) return;
+      const buf = Buffer.concat(chunks);
+      const sep = buf.indexOf(HEADER_SEP);
+      const head = sep >= 0 ? parseRequestHead(buf.subarray(0, sep).toString('latin1')) : null;
+      if (!head) {
+        handled = true;
+        cleanup();
+        try { socket.destroy(); } catch { /* ignore */ }
+        return;
+      }
+      const bodyStart = sep + HEADER_SEP.length;
+      forward(head.method, head.path, head.headers, buf.subarray(bodyStart, bodyStart + MAX_BODY_BYTES), true);
+    }, HARD_TIMEOUT_MS);
+
+    socket.on('data', onData);
+    tryParse();
+  }
+
+  /** Forward a fully-collected tunneled HTTPS request upstream and stream the response back. */
+  private forwardTunneledRequest(
+    deviceIp: string,
+    hostname: string,
+    port: number,
+    socket: tls.TLSSocket,
+    method: string,
+    pathPart: string,
+    hdrs: Record<string, string>,
+    reqBodyBuf: Buffer,
+    bodyTruncated: boolean
+  ): void {
+    const fullUrl = pathPart.startsWith('http')
+      ? pathPart
+      : `https://${hostname}${pathPart.startsWith('/') ? pathPart : `/${pathPart}`}`;
+    let requestSnapshot: NetworkHttpMessage = {
+      method,
+      url: fullUrl,
+      headers: hdrs,
+      ...encodeBody(reqBodyBuf, hdrs, bodyTruncated)
+    };
+
+    const tlsDecision = this.decisionFor(deviceIp, hostname, urlPath(fullUrl));
+
+    const writeStatusAndClose = (statusCode: number, statusText: string, body: string): void => {
+      try {
+        socket.write(`HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\n\r\n${body}`);
+      } catch { /* ignore */ }
+      try { socket.end(); } catch { /* ignore */ }
+    };
+
+    if (tlsDecision.block) {
+      this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, {
+        statusCode: 403,
+        statusText: 'Blocked by RDS',
+        body: 'Blocked by Roku Engineer Studio traffic rules'
+      });
+      writeStatusAndClose(403, 'Blocked by RDS', 'Blocked by Roku Engineer Studio traffic rules');
+      return;
+    }
+    if (tlsDecision.resetConnection) {
+      this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, {
+        statusCode: 0,
+        statusText: 'Connection reset (RDS fault)',
+        body: 'Connection reset by Roku Engineer Studio traffic rule'
+      });
+      try { socket.destroy(); } catch { /* ignore */ }
+      return;
+    }
+    if (tlsDecision.respond) {
+      const mock = tlsDecision.respond;
+      // Read the Map Local file (if any) before writing the raw response. The function is
+      // synchronous, so we resolve the body in a microtask and serialize the response inside it.
+      void this.resolveMockBody(mock)
+        .then((resolved) => {
+          this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, this.mockResponseSnapshot(mock, resolved));
+          if (resolved.error) {
+            writeStatusAndClose(502, 'Map Local Failed', `Map Local: ${resolved.error}`);
+            return;
+          }
+          const headers = resolved.headers;
+          const bodyBuf = resolved.bodyBuf;
+          const headerLines = Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\r\n');
+          const payload = Buffer.concat([
+            Buffer.from(
+              `HTTP/1.1 ${mock.statusCode} ${mock.statusText || 'Mocked'}\r\n` +
+                `content-length: ${bodyBuf.length}\r\nconnection: close\r\n${headerLines}${headerLines ? '\r\n' : ''}\r\n`,
+              'utf8'
+            ),
+            bodyBuf
+          ]);
+          const send = (): void => {
+            try { socket.write(payload); } catch { /* ignore */ }
+            try { socket.end(); } catch { /* ignore */ }
+          };
+          if (mock.delayMs && mock.delayMs > 0) setTimeout(send, mock.delayMs);
+          else send();
+        })
+        .catch(() => { try { socket.destroy(); } catch { /* ignore */ } });
+      return;
+    }
+
+    // Request-side rewrites (terminal actions returned above). Match ran on the original URL.
+    const reqOps = opsFor(tlsDecision.rewrite, 'request');
+    let effUrl = fullUrl;
+    let effHdrs = hdrs;
+    let effBody = reqBodyBuf;
+    if (reqOps.length) {
+      // Skip URL re-serialization for header-only rewrites (e.g. device presets); only recompute
+      // when an op actually mutates the URL.
+      if (hasUrlRewrite(reqOps)) effUrl = applyRequestUrl(reqOps, fullUrl);
+      effHdrs = applyHeaderOps(reqOps, hdrs);
+      if (hasBodyReplace(reqOps) && effBody.length && isTextualContentType(contentTypeOf(hdrs))) {
+        const { buffer: decoded } = decodeContentEncoding(effBody, hdrs);
+        effBody = Buffer.from(applyBodyReplace(reqOps, bodyToText(decoded, hdrs)), 'utf8');
+        delete effHdrs['content-encoding'];
+      }
+      requestSnapshot = {
+        method,
+        url: effUrl,
+        headers: effHdrs,
+        ...encodeBody(effBody, effHdrs, bodyTruncated)
+      };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(effUrl);
+    } catch {
+      this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, {
+        statusCode: 400,
+        statusText: 'Bad Request',
+        body: `Malformed request URL: ${effUrl}`
+      });
+      writeStatusAndClose(400, 'Bad Request', 'Malformed request URL');
+      return;
+    }
+
+    // One outcome per tunneled request: emit a transaction and close the socket exactly once,
+    // whether the upstream responds, errors, or times out. A hard timer is the absolute backstop.
+    let settled = false;
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    // Device closed the tunnel before the response completed — abort upstream so an
+    // aborted stream doesn't leak a socket. Named so `settle()` can remove it: `socket`
+    // is a reused keep-alive tunnel carrying many requests, so a per-request `on('close')`
+    // that's never removed accumulates listeners (MaxListenersExceededWarning + retained
+    // closures). On normal completion `settled` is already true, so this is a no-op.
+    const onSocketClose = (): void => {
+      if (settled) return;
+      settled = true;
+      settle();
+      try { upstream.destroy(); } catch { /* ignore */ }
+      this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, {
+        statusCode: 499,
+        statusText: 'Client Closed Request',
+        body: ''
+      });
+    };
+    const settle = (): void => {
+      if (hardTimer) {
+        clearTimeout(hardTimer);
+        hardTimer = null;
+      }
+      socket.removeListener('close', onSocketClose);
+    };
+    const failTunnel = (statusCode: number, statusText: string, msg: string): void => {
+      if (settled) return;
+      settled = true;
+      settle();
+      this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, {
+        statusCode,
+        statusText,
+        body: msg
+      });
+      writeStatusAndClose(statusCode, statusText, msg);
+    };
+
+    // Per-phase RDS→origin timing marks for the waterfall, plus a start time so tunneled MITM gets a
+    // real Duration total (the tunneled path previously emitted no `startedAtMs`, so it had none).
+    const marks: UpstreamMarks = {};
+    const startedAt = Date.now();
+
+    const upstream = https.request(
+      {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port ? Number(parsedUrl.port) : 443,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method,
+        headers: { ...stripHopByHop(effHdrs), host: parsedUrl.hostname },
+        timeout: REQUEST_TIMEOUT_MS,
+        servername: parsedUrl.hostname
+      },
+      async (upstreamRes) => {
+        if (settled) {
+          try { upstreamRes.destroy(); } catch { /* ignore */ }
+          return;
+        }
+        try {
+          const resOps = opsFor(tlsDecision.rewrite, 'response');
+          const resHeaders0 = normalizeHeaders(upstreamRes.headers);
+          const { buffer: rawBody, truncated: resTruncated } = await readResponseBody(upstreamRes);
+          if (settled) return;
+          settled = true;
+          settle();
+          // Response-side rewrites (status / header / body). Body-replace decodes gzip/br, edits the
+          // text, and drops content-encoding so the plain body is written with a corrected length.
+          let resBody = rawBody;
+          let resHeaders = resHeaders0;
+          let effStatus = upstreamRes.statusCode ?? 502;
+          let bodyReplaced = false;
+          if (resOps.length) {
+            const st = statusOverride(resOps);
+            if (st !== undefined) effStatus = st;
+            resHeaders = applyHeaderOps(resOps, resHeaders0);
+            if (hasBodyReplace(resOps) && resBody.length && isTextualContentType(contentTypeOf(resHeaders0))) {
+              const { buffer: decoded } = decodeContentEncoding(resBody, resHeaders0);
+              resBody = Buffer.from(applyBodyReplace(resOps, bodyToText(decoded, resHeaders0)), 'utf8');
+              delete resHeaders['content-encoding'];
+              bodyReplaced = true;
+            }
+          }
+          const responseSnapshot: NetworkHttpMessage = {
+            statusCode: effStatus,
+            statusText: upstreamRes.statusMessage,
+            headers: resHeaders,
+            ...encodeBody(resBody, resHeaders, resTruncated)
+          };
+          this.emitTransaction(newTransactionId(), deviceIp, hostname, port, requestSnapshot, responseSnapshot, startedAt, computePhases(marks));
+
+          const statusLine = `HTTP/1.1 ${effStatus} ${upstreamRes.statusMessage}\r\n`;
+          const headerLines = serializeResponseHeaderLines(upstreamRes.headers, resOps, bodyReplaced, resBody.length);
+          const payload = Buffer.concat([
+            Buffer.from(`${statusLine}${headerLines}\r\n\r\n`, 'utf8'),
+            resBody
+          ]);
+          if (throttleIsActive(tlsDecision.throttle)) {
+            writeBodyThrottled(
+              (c) => { socket.write(c); },
+              () => { socket.end(); },
+              payload,
+              tlsDecision.throttle as TrafficThrottle
+            );
+          } else {
+            socket.write(payload);
+            socket.end();
+          }
+        } catch (err) {
+          failTunnel(502, 'Bad Gateway', err instanceof Error ? err.message : String(err));
+        }
+      }
+    );
+
+    // Attach timing listeners in the same tick as the request (observe-only; never alters forwarding).
+    instrumentUpstream(upstream, marks);
+
+    hardTimer = setTimeout(() => {
+      try { upstream.destroy(); } catch { /* ignore */ }
+      failTunnel(504, 'Gateway Timeout', 'Upstream did not respond in time');
+    }, HARD_TIMEOUT_MS);
+
+    upstream.on('timeout', () => {
+      try { upstream.destroy(); } catch { /* ignore */ }
+      failTunnel(504, 'Gateway Timeout', 'Upstream request timed out');
+    });
+
+    upstream.on('error', (err) => {
+      failTunnel(502, 'Bad Gateway', err.message);
+    });
+
+    socket.once('close', onSocketClose);
+
+    if (effBody.length) upstream.write(effBody);
+    upstream.end();
+  }
+}
+
+/** Coerce a loose header object into a lowercased-value-safe `Record<string,string>` (drops nullish). */
+function replayHeaderRecord(raw: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw) return out;
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof k === 'string' && k && typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
+/** Encode a *text* replay body to bytes using the request's declared charset, falling back to utf8. */
+function encodeReplayTextBody(body: string, headers: Record<string, string>): Buffer {
+  const ct = headers['content-type'] || headers['Content-Type'] || '';
+  const m = /charset=([^;\s]+)/i.exec(ct);
+  const charset = m?.[1]?.replace(/['"]/g, '') || 'utf8';
+  try {
+    return Buffer.from(body, charset as BufferEncoding);
+  } catch {
+    return Buffer.from(body, 'utf8');
+  }
+}
+
+/**
+ * Re-issue an HTTP(S) request FROM THE RDS HOST (Replay / Edit & Resend) and return request+response
+ * snapshots in the same shape the proxy records for a captured transaction. Standalone: it never
+ * touches client sockets or the proxy server — it opens its own outbound connection via Node
+ * http/https and reuses this module's private encode/decode/read helpers (stripHopByHop,
+ * normalizeHeaders, readResponseBody, decodeContentEncoding via encodeBody) so nothing is duplicated
+ * from forwardRokuRequest. Never rejects: a bad URL / network error / timeout resolves with `ok:false`
+ * and a synthetic 4xx/5xx response, mirroring the forward path's 502/504 error shape.
+ */
+export async function performReplay(
+  input: ReplayHttpInput,
+  opts?: { timeoutMs?: number }
+): Promise<ReplayResult> {
+  const startedAt = Date.now();
+  const method = (input.method || 'GET').trim().toUpperCase() || 'GET';
+  const reqHeaders = replayHeaderRecord(input.headers);
+
+  // Decode the body to bytes: base64 preserves binary unchanged; text encodes via the charset.
+  let reqBody: Buffer = Buffer.alloc(0);
+  if (typeof input.body === 'string' && input.body.length) {
+    if (input.bodyEncoding === 'base64') {
+      try {
+        reqBody = Buffer.from(input.body, 'base64');
+      } catch {
+        reqBody = Buffer.alloc(0);
+      }
+    } else {
+      reqBody = encodeReplayTextBody(input.body, reqHeaders);
+    }
+  }
+
+  // Snapshot of what we're sending (re-encoded for display via the shared encodeBody helper).
+  const requestSnapshot: NetworkHttpMessage = {
+    method,
+    url: input.url,
+    headers: reqHeaders,
+    ...encodeBody(reqBody, reqHeaders, false)
+  };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input.url);
+  } catch {
+    const msg = `Invalid URL: ${input.url}`;
+    return {
+      ok: false,
+      request: requestSnapshot,
+      response: { statusCode: 400, statusText: 'Bad Request', body: msg },
+      durationMs: Date.now() - startedAt,
+      hostname: '',
+      destPort: 0,
+      error: msg
+    };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    const msg = `Unsupported protocol: ${parsed.protocol}`;
+    return {
+      ok: false,
+      request: requestSnapshot,
+      response: { statusCode: 400, statusText: 'Bad Request', body: msg },
+      durationMs: Date.now() - startedAt,
+      hostname: parsed.hostname,
+      destPort: 0,
+      error: msg
+    };
+  }
+
+  const isHttps = parsed.protocol === 'https:';
+  const mod = isHttps ? https : http;
+  const hostname = parsed.hostname;
+  const destPort = parsed.port ? Number(parsed.port) : isHttps ? 443 : 80;
+
+  // Node forbids setting Host/Content-Length via arbitrary headers on some paths and hop-by-hop
+  // headers must not be forwarded — strip them and set Host + Content-Length ourselves.
+  const outboundHeaders = stripHopByHop(reqHeaders);
+  outboundHeaders.host = parsed.host;
+  if (reqBody.length) outboundHeaders['content-length'] = String(reqBody.length);
+
+  const requested = typeof opts?.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : REQUEST_TIMEOUT_MS;
+  const timeoutMs = Math.min(HARD_TIMEOUT_MS, Math.max(1000, requested));
+
+  return await new Promise<ReplayResult>((resolve) => {
+    let settled = false;
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    const done = (result: ReplayResult): void => {
+      if (settled) return;
+      settled = true;
+      if (hardTimer) {
+        clearTimeout(hardTimer);
+        hardTimer = null;
+      }
+      resolve(result);
+    };
+    const fail = (statusCode: number, statusText: string, msg: string): void => {
+      done({
+        ok: false,
+        request: requestSnapshot,
+        response: { statusCode, statusText, body: msg },
+        durationMs: Date.now() - startedAt,
+        hostname,
+        destPort,
+        error: msg
+      });
+    };
+
+    const upstream = mod.request(
+      {
+        hostname,
+        port: destPort,
+        path: `${parsed.pathname}${parsed.search}`,
+        method,
+        headers: outboundHeaders,
+        timeout: timeoutMs,
+        servername: isHttps ? hostname : undefined
+      },
+      async (res) => {
+        try {
+          const resHeaders = normalizeHeaders(res.headers);
+          const read =
+            method === 'HEAD'
+              ? { buffer: Buffer.alloc(0), truncated: false }
+              : await readResponseBody(res);
+          const responseSnapshot: NetworkHttpMessage = {
+            statusCode: res.statusCode ?? 502,
+            statusText: res.statusMessage,
+            headers: resHeaders,
+            ...encodeBody(read.buffer, resHeaders, read.truncated)
+          };
+          done({
+            ok: true,
+            request: requestSnapshot,
+            response: responseSnapshot,
+            durationMs: Date.now() - startedAt,
+            hostname,
+            destPort
+          });
+        } catch (err) {
+          fail(502, 'Bad Gateway', err instanceof Error ? err.message : String(err));
+        }
+      }
+    );
+
+    // Absolute backstop independent of socket events (mirrors forwardRokuRequest).
+    hardTimer = setTimeout(() => {
+      try {
+        upstream.destroy();
+      } catch {
+        /* ignore */
+      }
+      fail(504, 'Gateway Timeout', 'Upstream did not respond in time');
+    }, HARD_TIMEOUT_MS);
+
+    upstream.on('timeout', () => {
+      try {
+        upstream.destroy();
+      } catch {
+        /* ignore */
+      }
+      fail(504, 'Gateway Timeout', 'Upstream request timed out');
+    });
+    upstream.on('error', (err) => fail(502, 'Bad Gateway', err.message));
+
+    if (reqBody.length) upstream.write(reqBody);
+    upstream.end();
+  });
+}

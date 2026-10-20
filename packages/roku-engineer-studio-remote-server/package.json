@@ -1,0 +1,52 @@
+{
+  "name": "roku-engineer-studio-remote-server",
+  "version": "1.1.0",
+  "description": "Remote server for Roku Engineer Studio - enables remote device control and telnet debug console streaming",
+  "main": "roku-remote-server.js",
+  "bin": {
+    "roku-remote-server": "roku-remote-server.js"
+  },
+  "files": [
+    "roku-remote-server.js",
+    "swagger.json",
+    "swagger-ui.html",
+    "com.roku-engineer-studio.remote-server.plist",
+    "roku-remote-server.service"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "prepublishOnly": "npm run build",
+    "start": "node roku-remote-server.js",
+    "start:port": "node roku-remote-server.js 4951",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cavanaugh-Design-Studio/Roku-Engineer.git",
+    "directory": "packages/roku-engineer-studio-remote-server"
+  },
+  "bugs": {
+    "url": "https://github.com/Cavanaugh-Design-Studio/Roku-Engineer/issues"
+  },
+  "homepage": "https://github.com/Cavanaugh-Design-Studio/Roku-Engineer#readme",
+  "keywords": [
+    "roku",
+    "remote",
+    "ecp",
+    "ssdp"
+  ],
+  "author": "Hareendra Donapati",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "dependencies": {
+    "roku-engineer-studio-api": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "roku-engineer-studio-platform": "^1.0.0"
+  }
+}

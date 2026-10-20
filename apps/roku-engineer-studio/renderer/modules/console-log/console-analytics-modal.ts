@@ -1,0 +1,703 @@
+/**
+ * Console Monitor modal — a read-only breakdown of recognized BrightScript issues in a set of console
+ * lines: total issues, per-category tallies, and an expandable list of each issue type with the unique
+ * log lines that triggered it.
+ *
+ * CONTENT-ONLY. The caller passes a `getSnapshot` provider that returns already-computed
+ * {@link ConsoleFindings} (plus display meta), NOT raw lines — so the modal has no idea where the
+ * findings came from:
+ *   - the live telnet Console computes them in-renderer from its resident buffer and calls `refresh()`
+ *     as new lines stream in;
+ *   - the windowed Log Viewer scans the whole file in the main process and hands over a one-shot
+ *     snapshot (no refresh).
+ *
+ * `computeConsoleFindings` (in the shared catalog) is the single source of truth — the same aggregation
+ * backs the `console_monitor_findings` MCP tool.
+ */
+
+import { escapeHtml } from '../utils/dom.js';
+import { attachBackdropClickToClose } from '../utils/modal-backdrop-click.js';
+import { openModalOverlayActiveFromOpener, closeModalWithOriginMotion } from '../utils/modal-origin-motion.js';
+import { S } from '@shared/strings/index.js';
+import type {
+  ConsoleFindings,
+  ConsoleFinding,
+  BrsCrash,
+  BeaconTiming
+} from '@shared/console/brightscript-error-catalog.js';
+
+export interface ConsoleAnalyticsMeta {
+  /** Lines actually scanned for findings. */
+  bufferedCount: number;
+  /** Total lines available; when > bufferedCount the subtitle notes that older lines weren't scanned. */
+  totalCount: number;
+}
+
+export interface ConsoleAnalyticsSnapshot {
+  /** Pre-aggregated findings — the modal renders these verbatim. */
+  findings: ConsoleFindings;
+  /** How many lines produced the findings (shown as "N issues across M lines"). */
+  scannedLines: number;
+  /** Optional first/last per-line timestamps for the subtitle's time span (both null → omitted). */
+  timeSpan: { first: string | null; last: string | null };
+  meta: ConsoleAnalyticsMeta;
+}
+
+export interface ConsoleAnalyticsHandle {
+  close: () => void;
+  /** Re-pull the snapshot and re-render in place (preserving expanded issues + log scroll). */
+  refresh: () => void;
+}
+
+const ANALYTICS_STYLE_ID = 'console-analytics-modal-styles';
+
+/**
+ * Inject the Console Monitor styles once, from here — so the modal carries its own CSS to whichever
+ * document opens it (the main window OR the standalone Log Viewer window, which has no shared
+ * stylesheet). `.telnet-an-overlay` is made self-sufficient (it does NOT rely on the global
+ * `.modal-overlay` base, which the Log Viewer lacks); its values match that base. Mirrors the
+ * `ensureFindHighlightStyles` pattern.
+ */
+function ensureConsoleAnalyticsStyles(): void {
+  if (document.getElementById(ANALYTICS_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = ANALYTICS_STYLE_ID;
+  style.textContent = `
+    .telnet-an-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); display: flex; align-items: center; justify-content: center; z-index: 5000; backdrop-filter: blur(4px); }
+    .telnet-an-modal {
+      width: 820px; max-width: 96vw; min-width: 460px; max-height: 88vh; min-height: 260px;
+      display: flex; flex-direction: column; background: var(--bg-secondary); border: 1px solid var(--border);
+      border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55); overflow: hidden; resize: both;
+    }
+    .telnet-an-header { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    .telnet-an-icon { color: var(--accent-purple); flex: 0 0 auto; display: inline-flex; }
+    /* Size the header glyph here so the modal doesn't depend on the host document defining .icon-xl. */
+    .telnet-an-icon .icon { font-size: 24px; }
+    .telnet-an-title { flex: 1 1 auto; min-width: 0; }
+    .telnet-an-title h3 { margin: 0; font-size: 14px; font-weight: 700; color: var(--text-primary); }
+    .telnet-an-sub { margin: 2px 0 0; font-size: 11.5px; color: var(--text-secondary); }
+    .telnet-an-sub-note { color: var(--text-muted); }
+    .telnet-an-sub-crash { color: #fca5a5; font-weight: 700; }
+    /* Matches the shared .modal-close look (index.html) so every modal's close button is identical. */
+    .telnet-an-close { width: 28px; height: 28px; flex: 0 0 auto; border: none; background: var(--bg-tertiary); color: var(--text-muted); border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; }
+    .telnet-an-close:hover { background: var(--accent-red-dim, rgba(239, 68, 68, 0.15)); color: var(--accent-red, #ef4444); }
+    .telnet-an-body { flex: 1 1 auto; min-height: 0; padding: 14px 16px; overflow-y: auto; }
+    .telnet-an-section { margin-top: 18px; }
+    .telnet-an-section:first-child { margin-top: 0; }
+    .telnet-an-section h4 { margin: 0 0 9px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+    .telnet-an-empty { margin: 0; font-size: 12px; color: var(--text-secondary); }
+    .telnet-an-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+    .telnet-an-cat { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 10px; font-size: 11.5px; color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 999px; }
+    .telnet-an-cat-count { font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; background: var(--bg-deep); color: var(--text-secondary); border-radius: 999px; padding: 1px 6px; }
+    .telnet-an-issue { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; background: var(--bg-tertiary); overflow: hidden; transition: border-color 0.15s ease; }
+    .telnet-an-issue:last-child { margin-bottom: 0; }
+    .telnet-an-issue[open] { border-color: var(--border-hover); }
+    /* Header row: [count]  message  [copy]  ————  [severity] */
+    .telnet-an-issue > summary { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; list-style: none; outline: none; transition: background 0.15s ease; }
+    .telnet-an-issue > summary::-webkit-details-marker { display: none; }
+    .telnet-an-issue > summary:hover { background: var(--bg-secondary); }
+    /* Chromium shows its native focus ring on <summary> for an ordinary mouse click (not just keyboard
+       nav), so a plain :focus-visible override isn't enough — outline: none above suppresses that, this
+       restores a proper themed ring for real keyboard focus only. */
+    .telnet-an-issue > summary:focus-visible { outline: 1px solid var(--accent-purple); outline-offset: -2px; }
+    /* When expanded, make the header read as a distinct title bar: a divider + a subtle lighter tint
+       (theme-independent; kept off --bg-deep so the count badge, which IS --bg-deep, stays distinct). */
+    .telnet-an-issue[open] > summary { background: rgba(255, 255, 255, 0.035); border-bottom: 1px solid var(--border); }
+    .telnet-an-issue[open] > summary:hover { background: rgba(255, 255, 255, 0.055); }
+    .telnet-an-issue-badge { flex: 0 0 auto; min-width: 24px; text-align: center; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-primary); background: var(--bg-deep); border: 1px solid var(--border-hover); border-radius: 999px; padding: 2px 8px; }
+    .telnet-an-issue-title { flex: 0 1 auto; min-width: 0; font-size: 12.5px; color: var(--text-primary); font-family: var(--font-mono, ui-monospace, monospace); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .telnet-an-copy { flex: 0 0 auto; border: none; background: transparent; color: var(--text-muted); cursor: pointer; padding: 3px 5px; border-radius: 5px; display: inline-flex; align-items: center; opacity: 0.7; transition: opacity 0.1s ease; }
+    .telnet-an-copy:hover { color: var(--text-primary); background: var(--bg-deep); opacity: 1; }
+    .telnet-an-copy.is-copied { color: var(--accent-green, #4ade80); opacity: 1; }
+    .telnet-an-jump { flex: 0 0 auto; border: none; background: transparent; color: var(--accent-purple); cursor: pointer; padding: 2px 6px; border-radius: 5px; font-size: 14px; line-height: 1; opacity: 0.8; }
+    .telnet-an-jump:hover { background: var(--bg-deep); opacity: 1; }
+    .telnet-an-sev { flex: 0 0 auto; margin-left: auto; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 999px; }
+    .telnet-an-sev.is-error { background: rgba(239, 68, 68, 0.16); color: #fca5a5; }
+    .telnet-an-sev.is-warning { background: rgba(251, 191, 36, 0.16); color: var(--accent-amber, #fbbf24); }
+    .telnet-an-sev.is-info { background: rgba(59, 130, 246, 0.16); color: #93c5fd; }
+    .telnet-an-sev.is-crash { background: rgba(239, 68, 68, 0.28); color: #fecaca; }
+    /* Crash cards read as more severe than a plain error: a solid red left rail. */
+    .telnet-an-issue.telnet-an-crash { border-left: 3px solid var(--accent-red, #ef4444); }
+    .telnet-an-crash-exit { display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #fecaca; background: rgba(239, 68, 68, 0.2); border-radius: 4px; padding: 1px 5px; vertical-align: middle; }
+    .telnet-an-crash-site { font-family: var(--font-mono, ui-monospace, monospace); color: var(--text-secondary); }
+    .telnet-an-crash-code { color: var(--text-muted); }
+    /* Backtrace: a compact monospace stack, innermost frame first. */
+    .telnet-an-bt { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-deep); overflow: hidden; }
+    .telnet-an-bt-frame { display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+    .telnet-an-bt-frame:last-child { border-bottom: none; }
+    .telnet-an-bt-depth { flex: 0 0 auto; min-width: 22px; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+    .telnet-an-bt-func { flex: 1 1 auto; min-width: 0; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.5; color: var(--text-secondary); word-break: break-word; }
+    .telnet-an-bt-loc { flex: 0 0 auto; align-self: baseline; font-size: 10px; color: var(--text-muted); font-family: var(--font-mono, ui-monospace, monospace); white-space: nowrap; }
+    .telnet-an-crash-note { margin: 0; font-size: 12px; color: var(--text-secondary); }
+    /* Expand/collapse: entirely native, no JS. Chrome's ::details-content pseudo-element (which wraps
+       every non-summary child) is specifically built to animate <details> open/close — it keeps the
+       content actually rendered through the closing transition (normally <details> yanks non-open
+       content out of layout instantly, which is what made a JS-driven approach fight the browser) and
+       supports height:auto as a genuine transition endpoint. The open attribute still flips exactly
+       when the browser's native summary click handles it; only the visual reveal is deferred. */
+    .telnet-an-issue { interpolate-size: allow-keywords; }
+    .telnet-an-issue::details-content {
+      height: 0;
+      overflow: clip;
+      opacity: 0;
+      transition: height 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease, content-visibility 0.28s allow-discrete;
+    }
+    .telnet-an-issue[open]::details-content { height: auto; opacity: 1; }
+    @media (prefers-reduced-motion: reduce) {
+      .telnet-an-issue::details-content { transition: none; }
+    }
+    /* Live-refresh arrival animations (see render()'s count-diffing below) — deliberately reuse this
+       app's own established "make the user notice this" convention (console-occurrence-flash-kf in
+       reveal-occurrence.ts: a 1.8s purple background flash) applied to the WHOLE card rather than a
+       small sub-element, since a short/tiny-area animation reads as unnoticeable against a list full
+       of static cards. A brand-new finding/crash/beacon card also slides+fades in on top of the flash;
+       an existing card whose occurrence count just ticked up gets the same card-wide flash plus an
+       extra pop on its count badge specifically. Never applied on the modal's first paint — only on a
+       later refresh(). */
+    @keyframes telnet-an-card-enter-kf {
+      0% { opacity: 0; transform: translateY(-10px); background-color: rgba(139, 92, 246, 0.55); }
+      15% { opacity: 1; transform: translateY(0); }
+      100% { background-color: rgba(139, 92, 246, 0); }
+    }
+    .telnet-an-card-enter { animation: telnet-an-card-enter-kf 1.8s cubic-bezier(0.16, 1, 0.3, 1); }
+    @keyframes telnet-an-card-bump-kf {
+      0% { background-color: rgba(139, 92, 246, 0.55); }
+      100% { background-color: rgba(139, 92, 246, 0); }
+    }
+    .telnet-an-card-bump { animation: telnet-an-card-bump-kf 1.8s ease-out; }
+    @keyframes telnet-an-badge-bump-kf {
+      0% { transform: scale(1); }
+      35% { transform: scale(1.5); background: var(--accent-purple); color: #fff; border-color: var(--accent-purple); }
+      100% { transform: scale(1); }
+    }
+    .telnet-an-badge-bump { animation: telnet-an-badge-bump-kf 0.9s ease; }
+    @media (prefers-reduced-motion: reduce) {
+      .telnet-an-card-enter, .telnet-an-card-bump, .telnet-an-badge-bump { animation: none; }
+    }
+    .telnet-an-issue-body { padding: 15px 14px 16px; }
+    .telnet-an-issue-kind { margin: 0 0 12px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    /* Label / value grid — replaces the packed "What: … Cause: …" paragraphs. */
+    .telnet-an-meta { display: grid; grid-template-columns: max-content 1fr; gap: 9px 14px; margin: 0; align-items: baseline; }
+    .telnet-an-meta dt { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    .telnet-an-meta dd { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
+    .telnet-an-issue-docs { color: var(--accent-purple); text-decoration: none; white-space: nowrap; }
+    .telnet-an-issue-docs:hover { text-decoration: underline; }
+    .telnet-an-occ-head { margin: 16px 0 7px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    /* The beacon card has no meta block (What/Cause/Fix) above this like an issue card does, so its own
+       16px margin-top would stack on the card body's padding for no reason — collapse it there. */
+    .telnet-an-issue-body > .telnet-an-occ-head:first-child { margin-top: 0; }
+    .telnet-an-logs { max-height: 168px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-deep); }
+    .telnet-an-log { display: flex; align-items: flex-start; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+    .telnet-an-log:last-child { border-bottom: none; }
+    /* Clickable occurrence: jumps to the line in the console/log behind the modal. */
+    .telnet-an-log.is-navigable { cursor: pointer; }
+    .telnet-an-log.is-navigable:hover { background: rgba(255, 255, 255, 0.05); }
+    .telnet-an-log.is-navigable:focus-visible { outline: 1px solid var(--accent-purple); outline-offset: -2px; }
+    .telnet-an-log-go { flex: 0 0 auto; align-self: center; color: var(--accent-purple); font-size: 13px; line-height: 1; opacity: 0; transition: opacity 0.1s ease; }
+    .telnet-an-log.is-navigable:hover .telnet-an-log-go,
+    .telnet-an-log.is-navigable:focus-visible .telnet-an-log-go { opacity: 0.95; }
+    .telnet-an-log code { flex: 1 1 auto; min-width: 0; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.5; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
+    .telnet-an-log-loc { flex: 0 0 auto; align-self: flex-start; margin-top: 1px; font-size: 10px; color: var(--text-muted); font-family: var(--font-mono, ui-monospace, monospace); white-space: nowrap; }
+    .telnet-an-log-count { flex: 0 0 auto; align-self: flex-start; min-width: 20px; text-align: center; margin-top: 1px; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 999px; padding: 1px 6px; }
+    .telnet-an-more { margin: 8px 0 0; font-size: 11px; color: var(--text-muted); }
+    .telnet-an-beacon-avg { flex: 0 0 auto; margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-secondary); font-family: var(--font-mono, ui-monospace, monospace); }
+    /* Beacon occurrences: Opening/Closing log lines stacked in a left column, a time cell spanning both
+       on the right (no <table>/rowspan — a flex row with align-items: stretch gives the same visual span
+       against a variable number of stacked rows on the left, matching every other row in this modal). */
+    .telnet-an-beacon-logs { background: transparent; border: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    /* flex-shrink: 0 is load-bearing, not decoration: overflow: hidden below (for the rounded corners)
+       zeroes this item's automatic min-height per the flexbox spec, so once 3+ occurrences push the
+       column past .telnet-an-logs's 168px max-height, the flex algorithm is otherwise free to shrink
+       EVERY row below its natural content height to fit — visually clipping the Closing log line. */
+    /* border-hover (not the plain --border used elsewhere in this file) — at --border's 0.12 alpha each
+       block read as borderless against the equally-dark .telnet-an-beacon-logs background. */
+    .telnet-an-beacon-occ { display: flex; align-items: stretch; flex-shrink: 0; border: 1px solid var(--border-hover); border-radius: 8px; background: var(--bg-deep); overflow: hidden; }
+    .telnet-an-beacon-occ-logs { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+    .telnet-an-beacon-occ-time { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 4px; padding: 8px 12px; border-left: 1px solid var(--border); background: var(--bg-tertiary); }
+    .telnet-an-beacon-occ-note { font-size: 10px; color: var(--text-muted); text-align: right; max-width: 200px; }`;
+  document.head.appendChild(style);
+}
+
+const num = (n: number): string => n.toLocaleString();
+
+/** Copy text to the clipboard — prefer the Web API, fall back to the app's `window.roku` bridge. */
+function copyToClipboard(text: string): void {
+  if (!text) return;
+  try {
+    const nav = navigator as Navigator & { clipboard?: { writeText?: (t: string) => Promise<void> } };
+    if (nav.clipboard?.writeText) {
+      void nav.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    /* fall through to the bridge */
+  }
+  const roku = (window as unknown as { roku?: { copyToClipboard?: (t: string) => unknown } }).roku;
+  roku?.copyToClipboard?.(text);
+}
+
+/** Brief "copied" affordance: swap the copy glyph for a check for ~1.2s. */
+function flashCopied(btn: HTMLElement): void {
+  const original = btn.innerHTML;
+  btn.classList.add('is-copied');
+  btn.innerHTML = `<span class="icon icon-xs"><svg><use href="#icon-check"/></svg></span>`;
+  window.setTimeout(() => {
+    if (!btn.isConnected) return; // a refresh may have rebuilt the list
+    btn.classList.remove('is-copied');
+    btn.innerHTML = original;
+  }, 1200);
+}
+
+function subtitleHtml(
+  f: ConsoleFindings,
+  scanned: number,
+  span: { first: string | null; last: string | null },
+  meta: ConsoleAnalyticsMeta
+): string {
+  const crashTotal = f.crashes.reduce((n, c) => n + c.count, 0);
+  const crashPart =
+    crashTotal > 0
+      ? `<span class="telnet-an-sub-crash">${S.consoleLog.crashCount(crashTotal)}</span> · `
+      : '';
+  const summary = `${crashPart}${S.consoleLog.issuesAcrossLines(f.totalIssues, scanned)}`;
+  const spill =
+    meta.totalCount > meta.bufferedCount
+      ? ` <span class="telnet-an-sub-note">${S.consoleLog.spillNote(meta.totalCount)}</span>`
+      : '';
+  const time =
+    span.first && span.last
+      ? ` <span class="telnet-an-sub-note">· ${escapeHtml(span.first)} – ${escapeHtml(span.last)}</span>`
+      : '';
+  return `${summary}${spill}${time}`;
+}
+
+function categoryChips(f: ConsoleFindings): string {
+  const chips = f.byCategory
+    .map(
+      ({ category, count }) =>
+        `<span class="telnet-an-cat"><span class="telnet-an-cat-name">${escapeHtml(category)}</span><span class="telnet-an-cat-count">${num(count)}</span></span>`
+    )
+    .join('');
+  return chips || `<p class="telnet-an-empty">${S.consoleLog.noRecognizedIssues}</p>`;
+}
+
+/** Scrollable table of the unique log lines for one issue, most-frequent first. When `navigable`, each
+ *  row is a button that jumps to the occurrence's first position in the console/log. */
+function issueLogTable(finding: ConsoleFinding, navigable: boolean): string {
+  const LINE_CAP = 100;
+  const rows = finding.lines
+    .slice(0, LINE_CAP)
+    .map((l) => {
+      const base = l.file ? (l.file.split('/').pop() ?? l.file) : '';
+      const loc =
+        base !== ''
+          ? `<span class="telnet-an-log-loc">${escapeHtml(base)}${l.line !== undefined ? '(' + num(l.line) + ')' : ''}</span>`
+          : '';
+      const canJump = navigable && l.indices.length > 0;
+      // Jump to the FIRST occurrence: for a dedup'd row all positions share the same text, so any is
+      // "that occurrence"; the first is the top-to-bottom-reading choice.
+      const navAttrs = canJump
+        ? ` class="telnet-an-log is-navigable" role="button" tabindex="0" data-nav-index="${l.indices[0]}" title="${S.consoleLog.goToLineTitle}"`
+        : ' class="telnet-an-log"';
+      const go = canJump ? `<span class="telnet-an-log-go" aria-hidden="true">→</span>` : '';
+      return `<div${navAttrs}><code>${escapeHtml(l.message)}</code>${loc}<span class="telnet-an-log-count">${num(l.count)}</span>${go}</div>`;
+    })
+    .join('');
+  const extra = finding.lines.length - LINE_CAP;
+  const more =
+    extra > 0 ? `<p class="telnet-an-more">${S.consoleLog.moreUniqueLines(extra)}</p>` : '';
+  return `<div class="telnet-an-logs" data-issue-id="${escapeHtml(finding.id)}">${rows}</div>${more}`;
+}
+
+function issuesList(f: ConsoleFindings, navigable: boolean): string {
+  return f.findings
+    .map((finding) => {
+      const docs = finding.docsUrl
+        ? ` <a class="telnet-an-issue-docs" href="${escapeHtml(finding.docsUrl)}" target="_blank" rel="noreferrer">${S.consoleLog.docsLink}</a>`
+        : '';
+      // Prefer the localizable catalog copy (keyed by the entry id / category value); fall back to the
+      // finding's own English text for any id/category not present in the catalog.
+      const loc = (S.consoleLog.errors as Record<
+        string,
+        { title: string; meaning: string; cause: string; fix: string }
+      >)[finding.id];
+      const title = loc?.title ?? finding.title;
+      const meaning = loc?.meaning ?? finding.meaning;
+      const cause = loc?.cause ?? finding.cause;
+      const fix = loc?.fix ?? finding.fix;
+      const category =
+        (S.consoleLog.errorCategories as Record<string, string>)[finding.category] ?? finding.category;
+      return (
+        `<details class="telnet-an-issue" data-issue-id="${escapeHtml(finding.id)}">` +
+        `<summary>` +
+        `<span class="telnet-an-issue-badge">${num(finding.count)}</span>` +
+        // Header = the REAL extracted message (not the paraphrased catalog title).
+        `<span class="telnet-an-issue-title" title="${escapeHtml(finding.message)}">${escapeHtml(finding.message)}</span>` +
+        `<button type="button" class="telnet-an-copy" data-copy="${escapeHtml(finding.message)}" title="${S.consoleLog.copyMessageTitle}" aria-label="${S.consoleLog.copyMessageAria}"><span class="icon icon-xs"><svg><use href="#icon-copy"/></svg></span></button>` +
+        `<span class="telnet-an-sev is-${finding.severity}">${escapeHtml(finding.severity)}</span>` +
+        `</summary>` +
+        `<div class="telnet-an-issue-body">` +
+        `<p class="telnet-an-issue-kind">${escapeHtml(category)} · ${escapeHtml(title)}</p>` +
+        `<dl class="telnet-an-meta">` +
+        `<dt>${S.consoleLog.labelWhat}</dt><dd>${escapeHtml(meaning)}</dd>` +
+        `<dt>${S.consoleLog.labelCause}</dt><dd>${escapeHtml(cause)}</dd>` +
+        `<dt>${S.consoleLog.labelFix}</dt><dd>${escapeHtml(fix)}${docs}</dd>` +
+        `</dl>` +
+        `<div class="telnet-an-occ-head">${S.consoleLog.occurrences(finding.lines.length)}</div>` +
+        issueLogTable(finding, navigable) +
+        `</div>` +
+        `</details>`
+      );
+    })
+    .join('');
+}
+
+/** Stable DOM key for a crash card (open-state preservation across live refreshes). */
+function crashDomKey(c: BrsCrash): string {
+  return `${c.message}@@${c.file ?? ''}:${c.line ?? ''}`;
+}
+
+/** The backtrace stack for one crash — innermost (crash-site) frame first. */
+function backtraceHtml(c: BrsCrash): string {
+  if (c.backtrace.length === 0) {
+    return `<p class="telnet-an-crash-note">${S.consoleLog.noBacktrace}</p>`;
+  }
+  const frames = c.backtrace
+    .map((fr) => {
+      const base = fr.file ? (fr.file.split('/').pop() ?? fr.file) : '';
+      const loc = base
+        ? `<span class="telnet-an-bt-loc">${escapeHtml(base)}${fr.line !== undefined ? '(' + num(fr.line) + ')' : ''}</span>`
+        : '';
+      return (
+        `<li class="telnet-an-bt-frame">` +
+        `<span class="telnet-an-bt-depth">#${num(fr.depth)}</span>` +
+        `<code class="telnet-an-bt-func">${escapeHtml(fr.func)}</code>${loc}</li>`
+      );
+    })
+    .join('');
+  return `<ol class="telnet-an-bt">${frames}</ol>`;
+}
+
+/** Crash cards — the message is the header, the backtrace the body. `navigable` adds a jump-to-crash
+ *  button (crashes carry the console positions they occupied in `indices`). */
+function crashesList(crashes: BrsCrash[], navigable: boolean): string {
+  return crashes
+    .map((c) => {
+      const site = c.file
+        ? `<span class="telnet-an-crash-site">${escapeHtml(c.file.split('/').pop() ?? c.file)}${c.line !== undefined ? '(' + num(c.line) + ')' : ''}</span>`
+        : '';
+      const code = c.code
+        ? ` · <span class="telnet-an-crash-code">${S.consoleLog.runtimeErrorLabel} ${escapeHtml(c.code)}</span>`
+        : '';
+      const exit = c.exited
+        ? `<span class="telnet-an-crash-exit" title="${S.consoleLog.exitedTitle}">${S.consoleLog.exitedLabel}${c.app ? ' · ' + escapeHtml(c.app) : ''}</span>`
+        : '';
+      const jump =
+        navigable && c.indices.length > 0
+          ? `<button type="button" class="telnet-an-jump" data-nav-index="${c.indices[0]}" title="${S.consoleLog.goToCrashTitle}" aria-label="${S.consoleLog.goToCrashTitle}">→</button>`
+          : '';
+      const kind = site || code ? `${S.consoleLog.crashKindLabel} · ${site}${code}` : S.consoleLog.crashKindLabel;
+      return (
+        `<details class="telnet-an-issue telnet-an-crash" data-crash-id="${escapeHtml(crashDomKey(c))}">` +
+        `<summary>` +
+        `<span class="telnet-an-issue-badge">${num(c.count)}</span>` +
+        `<span class="telnet-an-issue-title" title="${escapeHtml(c.message)}">${escapeHtml(c.message)}${exit}</span>` +
+        `<button type="button" class="telnet-an-copy" data-copy="${escapeHtml(c.raw)}" title="${S.consoleLog.copyCrashTitle}" aria-label="${S.consoleLog.copyCrashAria}"><span class="icon icon-xs"><svg><use href="#icon-copy"/></svg></span></button>` +
+        jump +
+        `<span class="telnet-an-sev is-crash">${S.consoleLog.severityCrash}</span>` +
+        `</summary>` +
+        `<div class="telnet-an-issue-body">` +
+        `<p class="telnet-an-issue-kind">${kind}</p>` +
+        `<div class="telnet-an-occ-head">${S.consoleLog.backtraceHead}</div>` +
+        backtraceHtml(c) +
+        `</div>` +
+        `</details>`
+      );
+    })
+    .join('');
+}
+
+/** Beacon timings grouped by flow (e.g. every `AppCompile` pairing together), most-occurrences first —
+ *  the same shape as an issue's catalog-id grouping, so the group renders as the same card. */
+interface BeaconGroup {
+  flow: string;
+  label: string;
+  timings: BeaconTiming[];
+}
+
+function groupBeaconTimings(beacons: readonly BeaconTiming[]): BeaconGroup[] {
+  const order: string[] = [];
+  const byFlow = new Map<string, BeaconTiming[]>();
+  for (const b of beacons) {
+    if (!byFlow.has(b.flow)) {
+      byFlow.set(b.flow, []);
+      order.push(b.flow);
+    }
+    byFlow.get(b.flow)!.push(b);
+  }
+  return order
+    .map((flow) => ({ flow, label: byFlow.get(flow)![0]!.label, timings: byFlow.get(flow)! }))
+    .sort((a, b) => b.timings.length - a.timings.length);
+}
+
+/** One raw beacon line (Opening or Closing) as its own clickable row — same look as an issue occurrence
+ *  row (growing `<code>`, reveal-on-hover jump arrow), just without the trailing count/duration pill
+ *  (that lives once in the shared time cell alongside it, not per line). */
+function beaconLogLine(raw: string, index: number | undefined, navigable: boolean): string {
+  const canJump = navigable && index !== undefined;
+  const navAttrs = canJump
+    ? ` class="telnet-an-log is-navigable" role="button" tabindex="0" data-nav-index="${index}" title="${S.consoleLog.goToLineTitle}"`
+    : ' class="telnet-an-log"';
+  const go = canJump ? `<span class="telnet-an-log-go" aria-hidden="true">→</span>` : '';
+  return `<div${navAttrs}><code>${escapeHtml(raw)}</code>${go}</div>`;
+}
+
+/**
+ * One occurrence: the Opening (Initiate) and Closing (Complete) log lines stacked in a left column, each
+ * independently clickable, with the computed elapsed time — plus any dialog-excluded / cert-window note
+ * — in a side cell that spans the full height of both lines (an Opening row is omitted when its Initiate
+ * wasn't captured in this scan; the Closing line + duration still show).
+ */
+function beaconOccurrence(t: BeaconTiming, navigable: boolean): string {
+  const opening = t.openingRaw !== undefined ? beaconLogLine(t.openingRaw, t.openingIndex, navigable) : '';
+  const closing = beaconLogLine(t.raw, t.index, navigable);
+  const note = [
+    t.adjustedMs !== undefined ? S.consoleLog.beaconAdjustedNote(t.adjustedMs) : '',
+    t.withinCertWindow === false ? S.consoleLog.beaconCertWindowNote : ''
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const noteHtml = note ? `<span class="telnet-an-beacon-occ-note">${escapeHtml(note)}</span>` : '';
+  return (
+    `<div class="telnet-an-beacon-occ">` +
+    `<div class="telnet-an-beacon-occ-logs">${opening}${closing}</div>` +
+    `<div class="telnet-an-beacon-occ-time"><span class="telnet-an-log-count">${num(t.durationMs)} ms</span>${noteHtml}</div>` +
+    `</div>`
+  );
+}
+
+/** One flow's card — same `<details>` shell as an issue card (badge + title + a right-aligned AVERAGE
+ *  duration in the collapsed summary; expand for every occurrence's Opening/Closing log pair). */
+function beaconsList(f: ConsoleFindings, navigable: boolean): string {
+  return groupBeaconTimings(f.beacons)
+    .map((g) => {
+      const label = (S.consoleLog.beaconFlows as Record<string, string>)[g.flow] ?? g.label;
+      const domId = `beacon:${g.flow}`;
+      const rows = g.timings.map((t) => beaconOccurrence(t, navigable)).join('');
+      // A 0ms entry (e.g. an InstantOn/"Pended without Render" launch) is still a real occurrence —
+      // shown in the badge count and the occurrence list below — but it's not a real duration
+      // measurement, so it's excluded here to avoid dragging the average down.
+      const measured = g.timings.filter((t) => t.durationMs > 0);
+      const avgMs = measured.length > 0
+        ? Math.round(measured.reduce((sum, t) => sum + t.durationMs, 0) / measured.length)
+        : 0;
+      return (
+        `<details class="telnet-an-issue" data-issue-id="${escapeHtml(domId)}">` +
+        `<summary>` +
+        `<span class="telnet-an-issue-badge">${num(g.timings.length)}</span>` +
+        `<span class="telnet-an-issue-title">${escapeHtml(label)}</span>` +
+        `<span class="telnet-an-beacon-avg">${num(avgMs)} ms</span>` +
+        `</summary>` +
+        `<div class="telnet-an-issue-body">` +
+        `<div class="telnet-an-occ-head">${S.consoleLog.occurrences(g.timings.length)}</div>` +
+        `<div class="telnet-an-logs telnet-an-beacon-logs" data-issue-id="${escapeHtml(domId)}">${rows}</div>` +
+        `</div>` +
+        `</details>`
+      );
+    })
+    .join('');
+}
+
+function beaconsSection(f: ConsoleFindings, navigable: boolean): string {
+  if (f.beacons.length === 0) return '';
+  return `<section class="telnet-an-section"><h4>${S.consoleLog.sectionPerformance}</h4>${beaconsList(f, navigable)}</section>`;
+}
+
+function bodyHtml(f: ConsoleFindings, navigable: boolean): string {
+  // Crashes lead — they're the most severe thing in the buffer.
+  const crashes =
+    f.crashes.length > 0
+      ? `<section class="telnet-an-section"><h4>${S.consoleLog.sectionCrashes}</h4>${crashesList(f.crashes, navigable)}</section>`
+      : '';
+  return (
+    crashes +
+    beaconsSection(f, navigable) +
+    `<section class="telnet-an-section">` +
+    `<div class="telnet-an-cats">${categoryChips(f)}</div>` +
+    `</section>` +
+    (f.findings.length > 0
+      ? `<section class="telnet-an-section"><h4>${S.consoleLog.sectionIssues}</h4>${issuesList(f, navigable)}</section>`
+      : '')
+  );
+}
+
+/**
+ * Open the Console Monitor. `getSnapshot` is pulled on open and on every `refresh()`.
+ *
+ * When `onNavigate` is provided, each occurrence row becomes a button: clicking it closes the modal
+ * (it covers the surface, so revealing behind it would be pointless) and calls `onNavigate` with the
+ * occurrence's first position — a buffer index for the live Console, a file line for the Log Viewer.
+ * The caller maps that position to a view row and reveals it (see `revealAndFlashLine`).
+ */
+export function openConsoleAnalyticsModal(
+  getSnapshot: () => ConsoleAnalyticsSnapshot,
+  onClose?: () => void,
+  onNavigate?: (index: number) => void,
+  opener?: HTMLElement | null
+): ConsoleAnalyticsHandle {
+  ensureConsoleAnalyticsStyles();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay telnet-an-overlay';
+  overlay.innerHTML = `
+    <div class="telnet-an-modal" role="dialog" aria-modal="true" aria-label="${S.consoleLog.monitorTitle}">
+      <div class="telnet-an-header">
+        <span class="telnet-an-icon" aria-hidden="true"><span class="icon icon-xl"><svg><use href="#icon-monitor"/></svg></span></span>
+        <div class="telnet-an-title">
+          <h3>${S.consoleLog.monitorTitle}</h3>
+          <p class="telnet-an-sub" data-an-sub></p>
+        </div>
+        <button type="button" class="telnet-an-close" title="${S.common.close}" aria-label="${S.common.close}"><span class="icon icon-sm"><svg><use href="#icon-x"/></svg></span></button>
+      </div>
+      <div class="telnet-an-body" data-an-body></div>
+    </div>`;
+
+  const subEl = overlay.querySelector('[data-an-sub]') as HTMLElement;
+  const bodyEl = overlay.querySelector('[data-an-body]') as HTMLElement;
+
+  // Occurrence count per finding/crash/beacon-flow as of the last render — null only before the very
+  // first render, so the modal's initial content never fake-animates as "just arrived". Diffed against
+  // on every later `refresh()` to decide which cards are brand-new vs. which existing ones just had
+  // their count go up (see the bottom of `render()`).
+  let previousCounts: Map<string, number> | null = null;
+
+  const render = (): void => {
+    const { findings: f, scannedLines, timeSpan, meta } = getSnapshot();
+    // Preserve which issues/crashes are expanded + each log table's scroll offset across the re-render.
+    const openIds = new Set<string>();
+    bodyEl.querySelectorAll<HTMLElement>('details.telnet-an-issue[open]').forEach((d) => {
+      const id = d.getAttribute('data-issue-id') ?? d.getAttribute('data-crash-id');
+      if (id) openIds.add(id);
+    });
+    const scrolls = new Map<string, number>();
+    bodyEl.querySelectorAll<HTMLElement>('.telnet-an-logs').forEach((el) => {
+      const id = el.getAttribute('data-issue-id');
+      if (id) scrolls.set(id, el.scrollTop);
+    });
+
+    subEl.innerHTML = subtitleHtml(f, scannedLines, timeSpan, meta);
+    bodyEl.innerHTML = bodyHtml(f, !!onNavigate);
+
+    bodyEl.querySelectorAll<HTMLElement>('details.telnet-an-issue').forEach((d) => {
+      const id = d.getAttribute('data-issue-id') ?? d.getAttribute('data-crash-id');
+      if (id && openIds.has(id)) (d as HTMLDetailsElement).open = true;
+    });
+    bodyEl.querySelectorAll<HTMLElement>('.telnet-an-logs').forEach((el) => {
+      const id = el.getAttribute('data-issue-id');
+      const top = id ? scrolls.get(id) : undefined;
+      if (top !== undefined) el.scrollTop = top;
+    });
+
+    const newCounts = new Map<string, number>();
+    for (const finding of f.findings) newCounts.set(finding.id, finding.count);
+    for (const crash of f.crashes) newCounts.set(crashDomKey(crash), crash.count);
+    for (const group of groupBeaconTimings(f.beacons)) newCounts.set(`beacon:${group.flow}`, group.timings.length);
+    if (previousCounts) {
+      const prior = previousCounts;
+      bodyEl.querySelectorAll<HTMLElement>('details.telnet-an-issue').forEach((card) => {
+        const key = card.getAttribute('data-issue-id') ?? card.getAttribute('data-crash-id');
+        const count = key ? newCounts.get(key) : undefined;
+        if (!key || count === undefined) return;
+        const priorCount = prior.get(key);
+        if (priorCount === undefined) {
+          card.classList.add('telnet-an-card-enter');
+        } else if (count > priorCount) {
+          card.classList.add('telnet-an-card-bump');
+          card.querySelector('.telnet-an-issue-badge')?.classList.add('telnet-an-badge-bump');
+        }
+      });
+    }
+    previousCounts = newCounts;
+  };
+
+  // Let the user SELECT the issue title without the <summary> toggling the <details> shut. A drag to
+  // select fires a click on the summary (whose default action is the toggle); we cancel that toggle
+  // when the pointer moved between mousedown and click (a selection), but allow a plain click (a real
+  // toggle). Delegated on bodyEl so it survives the live re-renders that rebuild the inner HTML.
+  let downX = 0;
+  let downY = 0;
+  bodyEl.addEventListener('mousedown', (e) => {
+    if ((e.target as Element)?.closest?.('summary')) {
+      downX = e.clientX;
+      downY = e.clientY;
+    }
+  });
+  // Close the modal (it covers the surface) and hand the occurrence's position to the caller to reveal.
+  const navigateFromRow = (row: HTMLElement): void => {
+    const raw = row.getAttribute('data-nav-index');
+    const index = raw !== null ? Number.parseInt(raw, 10) : NaN;
+    if (!Number.isFinite(index)) return;
+    close();
+    onNavigate?.(index);
+  };
+
+  bodyEl.addEventListener('click', (e) => {
+    // Copy button in an issue header — copy the message; don't let the click toggle the <details>.
+    const copyBtn = (e.target as Element)?.closest?.('.telnet-an-copy');
+    if (copyBtn instanceof HTMLElement) {
+      e.preventDefault();
+      e.stopPropagation();
+      copyToClipboard(copyBtn.getAttribute('data-copy') ?? '');
+      flashCopied(copyBtn);
+      return;
+    }
+    // A navigable element — an occurrence row or a crash's jump button — jumps to that line and closes.
+    const navEl = (e.target as Element)?.closest?.('[data-nav-index]');
+    if (navEl instanceof HTMLElement) {
+      e.preventDefault();
+      e.stopPropagation();
+      navigateFromRow(navEl);
+      return;
+    }
+    if (!(e.target as Element)?.closest?.('summary')) return;
+    if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) e.preventDefault();
+  });
+  // Keyboard activation for focusable navigable elements (occurrence rows / crash jump buttons).
+  bodyEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const navEl = (e.target as Element)?.closest?.('[data-nav-index]');
+    if (navEl instanceof HTMLElement) {
+      e.preventDefault();
+      navigateFromRow(navEl);
+    }
+  });
+
+  document.body.appendChild(overlay);
+  // `render()` runs as the `afterActive` hook — after `.active` makes the overlay visible but
+  // before the motion measures the surface's layout box, so the animation sizes against the real
+  // (populated) content instead of the empty shell.
+  openModalOverlayActiveFromOpener(overlay, opener ?? null, render);
+
+  let closed = false;
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    closeModalWithOriginMotion(overlay, () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      onClose?.();
+    });
+  };
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', onKey);
+  attachBackdropClickToClose(overlay, close);
+  overlay.querySelector('.telnet-an-close')?.addEventListener('click', close);
+
+  return {
+    close,
+    refresh: () => {
+      if (!closed) render();
+    }
+  };
+}

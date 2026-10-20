@@ -1,0 +1,212 @@
+/** UI strings for the Dev App panel (password auth, sideloading, screenshots, quick remote, Device Performance metrics). */
+export const devApp = {
+  // ── Password auth (password-auth.ts) ──────────────────────────────────────
+  authenticated: 'Authenticated',
+  notAuthenticated: 'Not Authenticated',
+  verify: 'Verify',
+  enterDeveloperPassword: 'Enter a developer password.',
+  verificationNoResponse: 'Verification failed — no response from the Dev App.',
+
+  // ── Quick remote (quick-remote.ts) ────────────────────────────────────────
+  sendText: 'Send Text',
+  sending: 'Sending...',
+
+  // ── Screenshots (screenshots.ts) ──────────────────────────────────────────
+  captureDisabledTitle: 'Launch the sideloaded Dev App on the device to capture a screenshot.',
+  launchBeforeCapture: 'Launch the Dev App on the device before capturing a screenshot.',
+  capturing: 'Capturing...',
+  capture: 'Capture',
+  copiedTitle: 'Copied!',
+  copyScreenshot: 'Copy Screenshot',
+  saveScreenshotAs: 'Save Screenshot As…',
+  clearScreenshot: 'Clear Screenshot',
+  copiedToClipboard: '✓ Copied to clipboard',
+  savedTo: (filePath: string): string => `✓ Saved to: ${filePath}`,
+  failedToCopy: (detail: string): string => `Failed to copy: ${detail}`,
+  couldNotGetCanvasContext: 'Could not get canvas context',
+  couldNotEncodeScreenshot: 'Could not encode screenshot',
+  screenshotPreviewTitle: 'Screenshot',
+
+  // ── RCE live video (rce-video.ts, screenshots.ts RCE branch, index.ts) ────
+  captureSuccess: 'Captured!',
+  rceStreamNotReady: 'The video stream is not ready yet.',
+  rceVideoConnecting: 'Connecting to the video stream…',
+  rceVideoReconnecting: 'Reconnecting to the video stream…',
+  rceVideoStopped: 'Video stream stopped — the device is no longer running.',
+  rceVideoError: (detail: string): string => `Video stream error: ${detail}`,
+  rceVolumeLabel: 'Volume',
+  rceMuteLabel: 'Mute',
+  rceUnmuteLabel: 'Unmute',
+  rceDeviceScreenRelay: 'Screen Relay',
+  rceGalleryButton: 'Screenshots',
+  rceGalleryTitle: 'Session Screenshots',
+  rceGalleryEmpty: 'No screenshots captured yet this session.',
+  rceGalleryCapturedAt: (time: string): string => `Captured ${time}`,
+  downloadAll: 'Download All',
+  clearAll: 'Clear All',
+
+  // ── Sideloaded app card (sideloaded-app.ts) ───────────────────────────────
+  versionLabel: 'Version:',
+  unknown: 'Unknown',
+  noChannelSideloaded: 'No channel currently sideloaded',
+  launching: 'Launching',
+  launch: 'Launch',
+
+  // ── Sideloading (sideloading.ts) ──────────────────────────────────────────
+  dragDropUnavailable: 'Drag and drop is not available in this build',
+  selectFileAndPassword: 'Please select a file and enter your developer password',
+  installing: 'Installing...',
+  install: 'Install',
+  unknownError: 'Unknown error',
+  deleteSideloadedChannelConfirm: 'Delete Sideloaded Channel?',
+
+  // Shared between screenshots + sideloading
+  pleaseEnterDeveloperPassword: 'Please enter your developer password',
+
+  // ── Channel performance parse messages (remote-metrics-charts.ts) ─────────
+  channelPerfUnavailable: (err: string): string => `Channel Performance unavailable: ${err}`,
+  channelPerfUnavailableFailed: 'Channel Performance unavailable (status failed).',
+  chartAxisNow: 'now',
+
+  // ── Device Performance Action Script capture (device-metrics-performance-step.ts) ──
+  captionCpuGraph: 'CPU Usage (Graph)',
+  captionCpuProcess: 'CPU Usage (Process)',
+  captionSystemMemory: 'Memory Usage (System)',
+  captionGraphicsMemory: 'Memory Usage (Graphics)',
+  captionObjectsCount: 'BrightScript Objects (Count)',
+  captionObjectsMemory: 'BrightScript Objects (Memory)',
+  invalidChartType: 'Invalid Device Performance chart type.',
+  developerModeRequired: 'Developer Mode must be enabled on this device to capture performance metrics.',
+  remoteMetricsRootNotFound: 'Remote metrics root not found for this device tab.',
+  performanceCardNotFound: (selector: string): string => `Performance card not found: ${selector}`,
+  performanceCardNoVisibleBounds:
+    'Performance card has no visible bounds. Enable “Show Device Performance” (quad layout) on the Remote Section.',
+  chartRasterizeFailed: 'Chart rasterize failed (empty or invalid data URL).',
+  canvasUnavailable: 'Canvas unavailable',
+  couldNotDecodeCaptureForScaling: 'Could not decode capture for export scaling',
+  devicePerfHidden:
+    'Device Performance cards are hidden. On the Remote Section, turn on “Show Device Performance” (quad layout), then run this step again.',
+  couldNotShowDevicePerf:
+    'Could not show Device Performance automatically. On the Remote Section, turn on “Show Device Performance” (quad layout), then run this step again.',
+  stopped: 'Stopped',
+  couldNotCaptureDevicePerf:
+    'Could not capture Device Performance cards. Ensure the quad is visible and the window is not minimized.',
+  devicePerfAutoEnabledSummary:
+    'Show Device Performance (quad layout) was turned on automatically for this step.',
+  skippedNoProcStat: (caption: string): string =>
+    `Skipped "${caption}" capture — device has not produced <proc-stat> yet (requires Roku OS 15.2+).`,
+  skippedNoGraphics: (caption: string): string =>
+    `Skipped "${caption}" capture — device did not return r2d2-bitmaps data.`,
+
+  // ── Device metrics: chart export button (device-metrics.ts) ───────────────
+  exportAsJson: 'Export as JSON',
+  exportAsCsv: 'Export as CSV',
+  exportAsImage: 'Export as Image',
+  exportCpuDialogTitle: 'Export CPU Usage Data',
+  exportMemoryDialogTitle: 'Export Memory Usage Data',
+  exportObjectsDialogTitle: 'Export BrightScript Objects Data',
+  nothingToExportYet: 'Nothing to export yet',
+  exportedTo: (filePath: string): string => `✓ Exported to: ${filePath}`,
+  exportFailed: (detail: string): string => `Export failed: ${detail}`,
+
+  // ── Device metrics: process-state labels (device-metrics.ts) ──────────────
+  stateRunning: 'Running',
+  stateSleeping: 'Sleeping',
+  stateIdle: 'Idle',
+  stateTracingStop: 'Tracing Stop',
+  stateDiskWait: 'Disk Wait',
+  stateStopped: 'Stopped',
+  stateZombie: 'Zombie',
+  stateDead: 'Dead',
+
+  // ── Device metrics: objects resource monitor ──────────────────────────────
+  updatedAt: (time: string): string => `Updated: ${time}`,
+  memoryEstimatedHint:
+    'Memory is estimated from object counts and chanperf (“used”) memory when the device does not send per-type bytes.',
+  totalBrightScriptObjects: 'Total BrightScript Objects',
+
+  // ── Device metrics: header perf strip ─────────────────────────────────────
+  latestDevicePerfTitle: 'Latest Device Performance (Click to Open Remote)',
+
+  // ── Device metrics: CPU process table ─────────────────────────────────────
+  processLabel: 'Process',
+  waitingForProcStat: 'Waiting for proc-stat sample…',
+  stateFieldLabel: 'State',
+  channelUptime: 'Channel Uptime',
+  sinceFirstObserved: 'Since first observed',
+  userCpuTime: 'User CPU Time',
+  kernelCpuTime: 'Kernel CPU Time',
+  childCpuTime: 'Child CPU Time',
+  childFaults: 'Child Faults',
+  minorMajor: 'Minor/Major',
+  clockTickRate: 'Clock Tick Rate',
+  minorFaults: 'Minor Faults',
+  majorFaults: 'Major Faults',
+  stableFor: (duration: string): string => `Stable for ${duration}`,
+  childCpuTimeSecondary: (user: string, kernel: string): string => `User ${user} · Kernel ${kernel}`,
+
+  // ── Device metrics: chart hover series labels ─────────────────────────────
+  hoverTotal: 'Total',
+  hoverUser: 'User',
+  hoverKernel: 'Kernel',
+  hoverUsed: 'Used',
+  hoverResident: 'Resident',
+  hoverAnonymous: 'Anonymous',
+  hoverShared: 'Shared',
+  hoverLimit: 'Limit',
+  hoverTexture: 'Texture',
+  hoverGfxSystem: 'System',
+
+  // ── Bitmaps modal (bitmaps-modal.ts) ───────────────────────────────────────
+  bitmapsModalTitle: 'Graphics Bitmaps',
+  bitmapsFooterTotal: 'Total',
+  bitmapsFooterCount: (count: number): string => `${count} bitmap${count === 1 ? '' : 's'}`,
+  bitmapsModalEmpty: 'No bitmap data yet.',
+  bitmapsColName: 'Name',
+  bitmapsColDimensions: 'Dimensions',
+  bitmapsColBpp: 'BPP',
+  bitmapsBppTooltip: 'Bits per pixel',
+  bitmapsUpdatedAt: (timeStr: string, ago: string): string => `Updated ${timeStr} (${ago})`,
+  bitmapsUpdatedAtPlain: (timeStr: string): string => `Updated ${timeStr}`,
+  bitmapsUpdatedNever: 'Not yet updated',
+  bitmapsAgoSeconds: (s: number): string => `${s}s ago`,
+  bitmapsAgoMinutes: (m: number): string => `${m}m ago`,
+  bitmapsColSize: 'Size',
+
+  // ── Device metrics: error toasts ──────────────────────────────────────────
+  chanperfRequestFailed: 'chanperf request failed',
+  couldNotParseChanperf: 'Could not parse Channel Performance (Dev Mode / ECP / chanperf).',
+  objectCountsFailed: 'Object counts failed',
+  deviceMetricsUnavailable: 'Device Metrics unavailable',
+
+  // ── Device metrics: objects empty states ──────────────────────────────────
+  objectsEmptyBackground:
+    'No BrightScript object breakdown while the Dev App is in the background. Launch or switch to the Dev App on the device — metrics and object counts update only when it is in the foreground.',
+  objectsEmptyNoForeground:
+    'No BrightScript object breakdown yet. After the connection reports the foreground channel, launch the Dev App if you need sideloaded Dev App object counts.',
+  objectsEmptyNoCounts:
+    'No BrightScript object breakdown yet. Ensure Control by Mobile Apps (Network Access) is enabled and the foreground channel exposes object counts.',
+
+  // ── Device metrics: launch + paused nav ───────────────────────────────────
+  launchingProgress: 'Launching…',
+  launchFailed: 'Launch failed',
+  pausedSideloadFull: 'Device Performance Paused — Sideload Dev App to Resume',
+  pausedSideloadShort: 'Sideload to resume',
+  pausedLaunchFull: 'Device Performance Paused — Launch Dev App to Resume',
+  pausedLaunchShort: 'Launch to resume',
+  pausedUnknownFull: 'Device Performance Paused — bring the Dev App to the foreground to resume.',
+  pausedUnknownShort: 'Device Performance Paused',
+  bringDevAppToForegroundTitle:
+    'Bring the Dev App to the foreground on the device to enable Device Performance.',
+  showDevicePerfAutoOnToast:
+    'Show Device Performance was turned on so an Action Script could capture charts.',
+
+  // ── Native dialogs + IPC results (main: dev-app-handlers.ts) ──────────────
+  selectRokuChannelPackageTitle: 'Select Roku Channel Package',
+  rokuChannelPackageFilter: 'Roku Channel Package',
+  saveScreenshotDialogTitle: 'Save Screenshot',
+  imagesFilter: 'Images',
+  screenshotCapturedToast: 'Screenshot captured!',
+  sideloadWrongTypeError: 'Select a .zip or .pkg Roku channel package',
+  failedToSaveScreenshot: (detail: string): string => `Failed to save screenshot: ${detail}`,
+} as const;

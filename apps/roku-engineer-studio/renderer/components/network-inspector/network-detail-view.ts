@@ -1,0 +1,272 @@
+/**
+ * Shared detail-pane surface for the Network Inspector — used by BOTH the live tab
+ * (`network-tab.ts`) and the standalone Session Viewer (`network-session-viewer.ts`).
+ *
+ * It single-sources two things that were previously copy-pasted between the two windows:
+ *   - {@link detailPaneHtml}: the request/response two-pane markup (identical in both).
+ *   - {@link wireDetailInteractions}: the delegated click dispatch (tabs, wrap, copy, cURL/HAR,
+ *     URL modal, embedded JSON/XML modal, copy-menu toggle).
+ *
+ * Each window keeps its OWN `renderDetail` orchestration — the live tab layers on lazy on-disk
+ * detail loading, find bars, large-body badges and a repaint-skip signature, none of which the
+ * offline viewer needs — so this module deliberately owns only the parts that are truly identical.
+ */
+import type { RequestPaneTab, ResponsePaneTab } from './network-detail.js';
+import { S } from '@shared/strings/index.js';
+
+/** The `.ni-inspector-pane` request/response markup. Inject into a host element, then query the
+ *  `[data-ni-*]` hooks from it. Kept byte-for-byte in sync with the CSS contracts in index.html.
+ *  A FUNCTION (not a const) so the embedded `S.networkInspector.*` labels read from the ACTIVE
+ *  locale each time the pane is (re)injected — a const would freeze the startup locale. */
+export const detailPaneHtml = (): string => `
+  <div class="ni-inspector-empty" data-i18n="networkInspector.emptyDetail">${S.networkInspector.emptyDetail}</div>
+  <div class="ni-contents-split">
+    <div class="ni-contents-pane" data-ni-request-pane>
+      <div class="ni-contents-pane-head">
+        <div class="ni-pane-head-left">
+          <div class="ni-contents-label" data-i18n="networkInspector.request">${S.networkInspector.request}</div>
+          <div class="ni-pane-tabs" data-ni-pane-tabs="request">
+            <button type="button" class="ni-pane-tab active" data-ni-req-tab="overview" data-i18n="networkInspector.tabOverview">${S.networkInspector.tabOverview}</button>
+            <button type="button" class="ni-pane-tab" data-ni-req-tab="headers" data-i18n="networkInspector.tabHeaders">${S.networkInspector.tabHeaders}</button>
+            <button type="button" class="ni-pane-tab" data-ni-req-tab="body" data-i18n="networkInspector.tabBody">${S.networkInspector.tabBody}</button>
+          </div>
+          <div class="ni-copy-menu" data-ni-copy-menu>
+            <button type="button" class="ni-pane-tool-btn ni-copy-main" data-ni-copy="request" title="${S.networkInspector.copyRequestBody}" data-i18n-title="networkInspector.copyRequestBody" aria-label="${S.networkInspector.copyRequestBody}" data-i18n-aria-label="networkInspector.copyRequestBody">
+              <span class="icon icon-xs"><svg><use href="#icon-copy"/></svg></span>
+            </button>
+            <button type="button" class="ni-pane-tool-btn ni-copy-caret" data-ni-copy-menu-toggle title="${S.networkInspector.moreCopyOptions}" data-i18n-title="networkInspector.moreCopyOptions" aria-haspopup="true" aria-expanded="false" aria-label="${S.networkInspector.moreCopyOptions}" data-i18n-aria-label="networkInspector.moreCopyOptions" hidden>
+              <span class="icon icon-xs"><svg><use href="#icon-chevron-down"/></svg></span>
+            </button>
+            <div class="ni-copy-dropdown" data-ni-copy-dropdown role="menu" hidden>
+              <button type="button" class="ni-copy-dropdown-item" data-ni-copy-item="body" role="menuitem" data-i18n="networkInspector.copyBody">
+                <span class="ni-copy-item-icon icon icon-xs"><svg><use href="#icon-copy"/></svg></span>${S.networkInspector.copyBody}
+              </button>
+              <button type="button" class="ni-copy-dropdown-item" data-ni-copy-item="url" role="menuitem" data-i18n="networkInspector.copyUrl">
+                <span class="ni-copy-item-icon icon icon-xs"><svg><use href="#icon-link"/></svg></span>${S.networkInspector.copyUrl}
+              </button>
+              <button type="button" class="ni-copy-dropdown-item" data-ni-copy-item="curl" role="menuitem" data-i18n="networkInspector.copyAsCurl">
+                <span class="ni-copy-item-icon icon icon-xs"><svg><use href="#icon-terminal"/></svg></span>${S.networkInspector.copyAsCurl}
+              </button>
+              <button type="button" class="ni-copy-dropdown-item" data-ni-copy-item="har" role="menuitem" data-i18n="networkInspector.copyAsHar">
+                <span class="ni-copy-item-icon icon icon-xs"><svg><use href="#icon-download"/></svg></span>${S.networkInspector.copyAsHar}
+              </button>
+            </div>
+          </div>
+          <div class="ni-copy-menu ni-replay-menu" data-ni-replay-menu hidden>
+            <button type="button" class="ni-pane-tool-btn ni-copy-main" data-ni-replay title="${S.networkInspector.replayTitle}" data-i18n-title="networkInspector.replayTitle" aria-label="${S.networkInspector.replayAria}" data-i18n-aria-label="networkInspector.replayAria">
+              <span class="icon icon-xs"><svg><use href="#icon-replay"/></svg></span>
+            </button>
+            <button type="button" class="ni-pane-tool-btn ni-copy-caret" data-ni-replay-menu-toggle title="${S.networkInspector.moreReplayOptions}" data-i18n-title="networkInspector.moreReplayOptions" aria-haspopup="true" aria-expanded="false" aria-label="${S.networkInspector.moreReplayOptions}" data-i18n-aria-label="networkInspector.moreReplayOptions" hidden>
+              <span class="icon icon-xs"><svg><use href="#icon-chevron-down"/></svg></span>
+            </button>
+            <div class="ni-copy-dropdown ni-replay-dropdown" data-ni-replay-dropdown role="menu" hidden>
+              <button type="button" class="ni-copy-dropdown-item" data-ni-replay-item="replay" role="menuitem" data-i18n="networkInspector.replayNow">
+                <span class="ni-copy-item-icon icon icon-xs"><svg><use href="#icon-replay"/></svg></span>${S.networkInspector.replayNow}
+              </button>
+              <button type="button" class="ni-copy-dropdown-item" data-ni-replay-item="compose" role="menuitem" data-i18n="networkInspector.composeItem">
+                <span class="ni-copy-item-icon icon icon-xs"><svg><use href="#icon-edit-3"/></svg></span>${S.networkInspector.composeItem}
+              </button>
+            </div>
+          </div>
+          <button type="button" class="ni-pane-tool-btn ni-note-btn" data-ni-note-open title="${S.networkInspector.secNote}" data-i18n-title="networkInspector.secNote" aria-label="${S.networkInspector.secNote}" data-i18n-aria-label="networkInspector.secNote">
+            <span class="icon icon-xs"><svg><use href="#icon-file-text"/></svg></span>
+          </button>
+        </div>
+        <span class="ni-pane-badges">
+          <span class="ni-pane-badge ni-pane-badge--truncated" data-ni-req-truncated hidden title="${S.networkInspector.bodyTruncatedRequestTitle}" data-i18n-title="networkInspector.bodyTruncatedRequestTitle" data-i18n="networkInspector.bodyTruncated">${S.networkInspector.bodyTruncated}</span>
+        </span>
+        <div class="ni-pane-head-right" data-ni-req-format-wrap hidden>
+          <button type="button" class="ni-pane-tool-btn is-active" data-ni-wrap-toggle="request" title="${S.networkInspector.disableWordWrap}" data-i18n-title="networkInspector.disableWordWrap" aria-pressed="true" aria-label="${S.networkInspector.toggleWordWrap}" data-i18n-aria-label="networkInspector.toggleWordWrap">
+            <span class="icon icon-xs"><svg><use href="#icon-wrap-text"/></svg></span>
+          </button>
+          <div class="ni-pane-head-format">
+            <label class="ni-body-format-label" data-i18n="networkInspector.formatLabel">${S.networkInspector.formatLabel}</label>
+            <select class="ni-body-format-select" data-ni-body-format="request">
+              <option value="auto" selected data-i18n="networkInspector.formatAuto">${S.networkInspector.formatAuto}</option>
+              <option value="json" data-i18n="networkInspector.formatJson">${S.networkInspector.formatJson}</option>
+              <option value="xml" data-i18n="networkInspector.formatXml">${S.networkInspector.formatXml}</option>
+              <option value="raw" data-i18n="networkInspector.formatRaw">${S.networkInspector.formatRaw}</option>
+            </select>
+            <button type="button" class="ni-pane-tool-btn ni-format-info-btn" data-ni-req-format-info hidden title="${S.networkInspector.whyRawText}" data-i18n-title="networkInspector.whyRawText" aria-label="${S.networkInspector.whyRawText}" data-i18n-aria-label="networkInspector.whyRawText">
+              <span class="icon icon-xs"><svg><use href="#icon-info"/></svg></span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="ni-contents-scroll" data-ni-request-body tabindex="0"></div>
+    </div>
+    <div class="ni-contents-pane" data-ni-response-pane>
+      <div class="ni-contents-pane-head">
+        <div class="ni-pane-head-left">
+          <div class="ni-contents-label" data-i18n="networkInspector.response">${S.networkInspector.response}</div>
+          <div class="ni-pane-tabs" data-ni-pane-tabs="response">
+            <button type="button" class="ni-pane-tab active" data-ni-res-tab="headers" data-i18n="networkInspector.tabHeaders">${S.networkInspector.tabHeaders}</button>
+            <button type="button" class="ni-pane-tab" data-ni-res-tab="cookies" data-i18n="networkInspector.tabCookies">${S.networkInspector.tabCookies}</button>
+            <button type="button" class="ni-pane-tab" data-ni-res-tab="body" data-i18n="networkInspector.tabBody">${S.networkInspector.tabBody}</button>
+          </div>
+          <button type="button" class="ni-pane-tool-btn" data-ni-copy="response" title="${S.networkInspector.copyResponseBody}" data-i18n-title="networkInspector.copyResponseBody" aria-label="${S.networkInspector.copyResponseBody}" data-i18n-aria-label="networkInspector.copyResponseBody">
+            <span class="icon icon-xs"><svg><use href="#icon-copy"/></svg></span>
+          </button>
+        </div>
+        <span class="ni-pane-badges">
+          <span class="ni-pane-badge ni-pane-badge--truncated" data-ni-res-truncated hidden title="${S.networkInspector.bodyTruncatedResponseTitle}" data-i18n-title="networkInspector.bodyTruncatedResponseTitle" data-i18n="networkInspector.bodyTruncated">${S.networkInspector.bodyTruncated}</span>
+        </span>
+        <div class="ni-pane-head-right" data-ni-res-format-wrap hidden>
+          <button type="button" class="ni-pane-tool-btn is-active" data-ni-wrap-toggle="response" title="${S.networkInspector.disableWordWrap}" data-i18n-title="networkInspector.disableWordWrap" aria-pressed="true" aria-label="${S.networkInspector.toggleWordWrap}" data-i18n-aria-label="networkInspector.toggleWordWrap">
+            <span class="icon icon-xs"><svg><use href="#icon-wrap-text"/></svg></span>
+          </button>
+          <div class="ni-pane-head-format">
+            <label class="ni-body-format-label" data-i18n="networkInspector.formatLabel">${S.networkInspector.formatLabel}</label>
+            <select class="ni-body-format-select" data-ni-body-format="response">
+              <option value="auto" selected data-i18n="networkInspector.formatAuto">${S.networkInspector.formatAuto}</option>
+              <option value="json" data-i18n="networkInspector.formatJson">${S.networkInspector.formatJson}</option>
+              <option value="xml" data-i18n="networkInspector.formatXml">${S.networkInspector.formatXml}</option>
+              <option value="raw" data-i18n="networkInspector.formatRaw">${S.networkInspector.formatRaw}</option>
+            </select>
+            <button type="button" class="ni-pane-tool-btn ni-format-info-btn" data-ni-res-format-info hidden title="${S.networkInspector.whyRawText}" data-i18n-title="networkInspector.whyRawText" aria-label="${S.networkInspector.whyRawText}" data-i18n-aria-label="networkInspector.whyRawText">
+              <span class="icon icon-xs"><svg><use href="#icon-info"/></svg></span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="ni-contents-scroll" data-ni-response-body tabindex="0"></div>
+    </div>
+  </div>
+`;
+
+/** Callbacks the shared click dispatch invokes. Each window supplies its own implementations
+ *  (the live tab loads detail before exporting; the viewer already holds inlined bodies). */
+export type DetailInteractionHandlers = {
+  onUrl: (anchor: HTMLElement, url: string) => void;
+  onEmbedded: (anchor: HTMLElement, pane: 'request' | 'response', idx: number) => void;
+  onCopyMenuToggle: () => void;
+  /** A dropdown item: `kind` is 'body' | 'url' | 'curl' | 'har'. */
+  onCopyItem: (item: HTMLElement, kind: string) => void;
+  onCopyBody: (btn: HTMLElement, which: 'request' | 'response') => void;
+  onToggleWrap: (which: 'request' | 'response') => void;
+  onSetRequestTab: (tab: RequestPaneTab) => void;
+  onSetResponseTab: (tab: ResponsePaneTab) => void;
+  /** One-click Replay (primary button) — re-issue the selected request from the host, rules bypassed.
+   *  Optional: the offline Session Viewer supplies none, so its (hidden) replay menu is inert. */
+  onReplay?: () => void;
+  /** Open the Compose (Edit & Resend) modal for the selected request. `btn` (the clicked replay-menu
+   *  item) is the opener the modal grows out of / shrinks back into. */
+  onCompose?: (btn: HTMLElement) => void;
+  /** Toggle the replay split-menu dropdown (Replay Now / Edit & Resend…). */
+  onReplayMenuToggle?: () => void;
+  /** Open the per-request Note modal for the selected event (all event kinds — not export-gated).
+   *  `btn` (the clicked Notes button) is the opener the modal grows out of / shrinks back into. */
+  onNote?: (btn: HTMLElement) => void;
+};
+
+/**
+ * Attach the delegated click dispatch to a detail-pane container. Behaviourally identical to the
+ * live tab's original inline handler — extracted verbatim so both windows share one implementation.
+ */
+export function wireDetailInteractions(
+  detailPane: HTMLElement,
+  h: DetailInteractionHandlers,
+  opts?: AddEventListenerOptions
+): void {
+  detailPane.addEventListener(
+    'click',
+    (e) => {
+      const target = e.target as HTMLElement | null;
+      const urlBtn = target?.closest('[data-ni-url]') as HTMLElement | null;
+      if (urlBtn?.dataset.niUrl) {
+        e.preventDefault();
+        h.onUrl(urlBtn, urlBtn.dataset.niUrl);
+        return;
+      }
+      // JSON/XML embedded inside a raw text body → open the shared formatted viewer. Skip when the
+      // user is selecting text (a drag), so highlighting a fragment to copy doesn't pop the modal.
+      const embBtn = target?.closest('.ni-embedded-structured') as HTMLElement | null;
+      if (embBtn?.dataset.niEmbIdx) {
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) return;
+        e.preventDefault();
+        const pane = embBtn.closest('[data-ni-response-body]') ? 'response' : 'request';
+        h.onEmbedded(embBtn, pane, parseInt(embBtn.dataset.niEmbIdx, 10));
+        return;
+      }
+      const copyMenuToggle = target?.closest('[data-ni-copy-menu-toggle]') as HTMLElement | null;
+      if (copyMenuToggle) {
+        h.onCopyMenuToggle();
+        return;
+      }
+      const copyItem = target?.closest('[data-ni-copy-item]') as HTMLElement | null;
+      if (copyItem?.dataset.niCopyItem) {
+        h.onCopyItem(copyItem, copyItem.dataset.niCopyItem);
+        return;
+      }
+      const copyBtn = target?.closest('[data-ni-copy]') as HTMLElement | null;
+      if (copyBtn?.dataset.niCopy) {
+        h.onCopyBody(copyBtn, copyBtn.dataset.niCopy as 'request' | 'response');
+        return;
+      }
+      // Replay split-menu (optional — the offline Session Viewer wires none, so its hidden menu is inert).
+      const replayToggle = target?.closest('[data-ni-replay-menu-toggle]') as HTMLElement | null;
+      if (replayToggle) {
+        h.onReplayMenuToggle?.();
+        return;
+      }
+      const replayItem = target?.closest('[data-ni-replay-item]') as HTMLElement | null;
+      if (replayItem?.dataset.niReplayItem) {
+        if (replayItem.dataset.niReplayItem === 'compose') h.onCompose?.(replayItem);
+        else h.onReplay?.();
+        return;
+      }
+      const replayBtn = target?.closest('[data-ni-replay]') as HTMLElement | null;
+      if (replayBtn) {
+        h.onReplay?.();
+        return;
+      }
+      const noteBtn = target?.closest('[data-ni-note-open]') as HTMLElement | null;
+      if (noteBtn) {
+        h.onNote?.(noteBtn);
+        return;
+      }
+      const wrapBtn = target?.closest('[data-ni-wrap-toggle]') as HTMLElement | null;
+      if (wrapBtn) {
+        h.onToggleWrap(wrapBtn.dataset.niWrapToggle === 'response' ? 'response' : 'request');
+        return;
+      }
+      const reqTabBtn = target?.closest('[data-ni-req-tab]') as HTMLElement | null;
+      if (reqTabBtn?.dataset.niReqTab) {
+        const tab = reqTabBtn.dataset.niReqTab as RequestPaneTab;
+        if (tab === 'overview' || tab === 'headers' || tab === 'body') h.onSetRequestTab(tab);
+        return;
+      }
+      const resTabBtn = target?.closest('[data-ni-res-tab]') as HTMLElement | null;
+      if (resTabBtn?.dataset.niResTab) {
+        const tab = resTabBtn.dataset.niResTab as ResponsePaneTab;
+        if (tab === 'headers' || tab === 'cookies' || tab === 'body') h.onSetResponseTab(tab);
+      }
+    },
+    opts
+  );
+}
+
+/**
+ * Sync the per-pane word-wrap toggle buttons + body scrollers to the given wrap state. Shared by the
+ * live Network tab and the offline Session Viewer so the button state — including the `title`, which
+ * the viewer previously never updated (stale "Disable word wrap" tooltip) — stays consistent.
+ * `root` is where the `[data-ni-wrap-toggle]` buttons are queried (the panel / document).
+ */
+export function syncBodyWrap(opts: {
+  root: ParentNode;
+  requestBodyEl: Element | null;
+  responseBodyEl: Element | null;
+  requestWrap: boolean;
+  responseWrap: boolean;
+}): void {
+  (opts.requestBodyEl as HTMLElement | null)?.classList.toggle('ni-body-nowrap', !opts.requestWrap);
+  (opts.responseBodyEl as HTMLElement | null)?.classList.toggle('ni-body-nowrap', !opts.responseWrap);
+  opts.root.querySelectorAll('[data-ni-wrap-toggle]').forEach((btn) => {
+    const el = btn as HTMLElement;
+    const on = el.dataset.niWrapToggle === 'response' ? opts.responseWrap : opts.requestWrap;
+    el.classList.toggle('is-active', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    el.title = on ? S.networkInspector.disableWordWrap : S.networkInspector.enableWordWrap;
+  });
+}

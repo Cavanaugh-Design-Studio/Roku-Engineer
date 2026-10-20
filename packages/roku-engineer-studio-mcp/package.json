@@ -1,0 +1,38 @@
+{
+  "name": "roku-engineer-studio-mcp",
+  "version": "1.2.0",
+  "description": "MCP server exposing Roku Engineer Studio Action Scripts to AI agents",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "roku",
+    "brightscript",
+    "ai-agent",
+    "cursor",
+    "claude",
+    "developer-tools"
+  ],
+  "main": "dist/index.cjs",
+  "bin": {
+    "roku-engineer-studio-mcp": "dist/index.cjs"
+  },
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "docs": "node scripts/gen-docs.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "roku-engineer-studio-api": "file:../roku-engineer-studio-api",
+    "roku-engineer-studio-platform": "file:../roku-engineer-studio-platform"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  },
+  "files": [
+    "dist"
+  ]
+}

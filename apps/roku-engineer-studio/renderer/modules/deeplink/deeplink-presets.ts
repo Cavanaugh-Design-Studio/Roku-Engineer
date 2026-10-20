@@ -1,0 +1,399 @@
+/**
+ * Global saved Deep Link presets (App ID, Content ID, Media Type) persisted in app settings.
+ */
+import { rendererError } from '../utils/logger.js';
+import { setErrorLine } from '../utils/dom.js';
+import { attachBackdropClickToClose } from '../utils/modal-backdrop-click.js';
+import {
+  closeModalWithOriginMotion,
+  openModalOverlayActiveFromOpener
+} from '../utils/modal-origin-motion.js';
+import { registerRetranslate } from '../ui/retranslate-registry.js';
+import { S } from '@shared/strings/index.js';
+
+/** One custom key/value query param, beyond contentId/mediaType. */
+export type DeeplinkParam = { key: string; value: string };
+
+export type DeeplinkPreset = {
+  id: string;
+  name: string;
+  appId: string;
+  contentId: string;
+  mediaType: string;
+  /** Extra key/value params, in the order they were entered. Omitted/empty when there are none. */
+  params?: DeeplinkParam[];
+};
+
+const SETTINGS_KEY = 'deeplink-saved-presets';
+
+let savedPresets: DeeplinkPreset[] = [];
+let saveModalInitialized = false;
+let pendingSaveResolve: ((name: string | null) => void) | null = null;
+
+function paramsKey(params: readonly DeeplinkParam[] | undefined): string {
+  return (params ?? []).map((p) => `${p.key.trim()}=${p.value}`).join('&');
+}
+
+function presetKey(preset: Pick<DeeplinkPreset, 'appId' | 'contentId' | 'mediaType' | 'params'>): string {
+  return `${preset.appId.trim()}|${preset.contentId.trim()}|${preset.mediaType.trim()}|${paramsKey(preset.params)}`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** One custom-param row's markup. Exported so the panel's "Add Parameter" button can append a
+ *  single row without duplicating this template. */
+export function paramRowHtml(param: DeeplinkParam): string {
+  return `<div class="deeplink-param-row" data-deeplink-param-row>
+      <input type="text" class="deeplink-param-key" data-deeplink-param-key value="${escapeHtml(param.key)}" placeholder="${S.app.deeplinkParamKeyPlaceholder}" spellcheck="false" autocomplete="off">
+      <input type="text" class="deeplink-param-value" data-deeplink-param-value value="${escapeHtml(param.value)}" placeholder="${S.app.deeplinkParamValuePlaceholder}" spellcheck="false" autocomplete="off">
+      <button type="button" class="btn btn-secondary btn-icon deeplink-param-remove-btn" data-deeplink-param-remove title="${S.app.removeParameter}" aria-label="${S.app.removeParameter}">
+        <span class="icon icon-xs"><svg><use href="#icon-x"/></svg></span>
+      </button>
+    </div>`;
+}
+
+/** Replace a panel's param rows wholesale (used when applying a saved preset, or clearing). */
+export function setDeepLinkParams(panel: HTMLElement, params: readonly DeeplinkParam[]): void {
+  const rowsContainer = panel.querySelector('[data-deeplink-params-rows]');
+  if (!rowsContainer) return;
+  rowsContainer.innerHTML = params.map((p) => paramRowHtml(p)).join('');
+}
+
+function generatePresetId(): string {
+  const bytes = new Uint8Array(6);
+  window.crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes)
+    .map((b) => (b % 36).toString(36))
+    .join('');
+  return `dl-${Date.now()}-${suffix}`;
+}
+
+export function suggestPresetName(
+  appId: string,
+  contentId: string,
+  mediaType: string
+): string {
+  const parts = [appId.trim()];
+  if (contentId.trim()) parts.push(contentId.trim());
+  if (mediaType.trim()) parts.push(`(${mediaType.trim()})`);
+  return parts.join(' · ');
+}
+
+function normalizeParams(raw: unknown): DeeplinkParam[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: DeeplinkParam[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const key = typeof (entry as DeeplinkParam).key === 'string' ? (entry as DeeplinkParam).key.trim() : '';
+    if (!key) continue;
+    const value = typeof (entry as DeeplinkParam).value === 'string' ? (entry as DeeplinkParam).value : '';
+    out.push({ key, value });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function normalizePreset(raw: unknown): DeeplinkPreset | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const item = raw as DeeplinkPreset;
+  const appId = typeof item.appId === 'string' ? item.appId.trim() : '';
+  const name = typeof item.name === 'string' ? item.name.trim() : '';
+  if (!appId || !name) return null;
+  return {
+    id: typeof item.id === 'string' && item.id ? item.id : generatePresetId(),
+    name,
+    appId,
+    contentId: typeof item.contentId === 'string' ? item.contentId.trim() : '',
+    mediaType: typeof item.mediaType === 'string' ? item.mediaType.trim() : '',
+    params: normalizeParams(item.params)
+  };
+}
+
+async function persistPresets(): Promise<void> {
+  if (!window.roku?.setSetting) return;
+  try {
+    await window.roku.setSetting(SETTINGS_KEY, savedPresets);
+  } catch (e) {
+    rendererError('[Deep Link] Failed to save presets:', e);
+  }
+}
+
+export function getSavedDeeplinkPresets(): readonly DeeplinkPreset[] {
+  return savedPresets;
+}
+
+export function getPresetsForMediaType(mediaTypeValue: string): DeeplinkPreset[] {
+  const key = mediaTypeValue.trim().toLowerCase();
+  if (!key) return [];
+  return savedPresets.filter((p) => p.mediaType.trim().toLowerCase() === key);
+}
+
+function clearPanelsReferencingPresetIds(removedIds: Set<string>): void {
+  document.querySelectorAll<HTMLSelectElement>('.deeplink-saved-select').forEach((select) => {
+    if (removedIds.has(select.value)) select.value = '';
+  });
+  document.querySelectorAll<HTMLButtonElement>('.deeplink-saved-delete-btn').forEach((btn) => {
+    btn.disabled = true;
+  });
+}
+
+export async function deleteDeeplinkPresetsByIds(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const idSet = new Set(ids);
+  const before = savedPresets.length;
+  savedPresets = savedPresets.filter((p) => !idSet.has(p.id));
+  const removed = before - savedPresets.length;
+  if (removed > 0) {
+    await persistPresets();
+    clearPanelsReferencingPresetIds(idSet);
+    refreshSavedPresetDropdowns();
+  }
+  return removed;
+}
+
+export async function deleteDeeplinkPresetById(id: string): Promise<boolean> {
+  const index = savedPresets.findIndex((p) => p.id === id);
+  if (index === -1) return false;
+  savedPresets.splice(index, 1);
+  await persistPresets();
+  clearPanelsReferencingPresetIds(new Set([id]));
+  refreshSavedPresetDropdowns();
+  return true;
+}
+
+export function syncSavedPresetDeleteButton(panel: HTMLElement): void {
+  const savedSelect = panel.querySelector('.deeplink-saved-select') as HTMLSelectElement | null;
+  const deleteBtn = panel.querySelector('.deeplink-saved-delete-btn') as HTMLButtonElement | null;
+  if (!savedSelect || !deleteBtn) return;
+  deleteBtn.disabled = !savedSelect.value;
+}
+
+export function populateSavedPresetSelect(select: HTMLSelectElement): void {
+  const prev = select.value;
+  select.innerHTML = '';
+
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = S.deeplink.savedPresetPlaceholder;
+  select.appendChild(placeholder);
+
+  for (const preset of savedPresets) {
+    const opt = document.createElement('option');
+    opt.value = preset.id;
+    opt.textContent = preset.name;
+    select.appendChild(opt);
+  }
+
+  if (prev && savedPresets.some((p) => p.id === prev)) {
+    select.value = prev;
+  }
+}
+
+export function refreshSavedPresetDropdowns(): void {
+  const hasSaved = savedPresets.length > 0;
+  document.querySelectorAll<HTMLElement>('.deeplink-saved-row').forEach((row) => {
+    row.hidden = !hasSaved;
+  });
+  document.querySelectorAll<HTMLSelectElement>('.deeplink-saved-select').forEach((select) => {
+    populateSavedPresetSelect(select);
+    const panel = select.closest('.tab-panel');
+    if (panel instanceof HTMLElement) syncSavedPresetDeleteButton(panel);
+  });
+}
+
+export function applyPresetToPanel(
+  panel: HTMLElement,
+  preset: DeeplinkPreset,
+  opts?: { updateSavedSelect?: boolean }
+): void {
+  const appIdInput = panel.querySelector('.deeplink-app-id') as HTMLInputElement | null;
+  const contentIdInput = panel.querySelector('.deeplink-content-id') as HTMLInputElement | null;
+  const mediaTypeSelect = panel.querySelector('.deeplink-media-type') as HTMLSelectElement | null;
+  const savedSelect = panel.querySelector('.deeplink-saved-select') as HTMLSelectElement | null;
+
+  if (appIdInput) appIdInput.value = preset.appId;
+  if (contentIdInput) contentIdInput.value = preset.contentId;
+  if (mediaTypeSelect) {
+    const hasOption = Array.from(mediaTypeSelect.options).some((o) => o.value === preset.mediaType);
+    mediaTypeSelect.value = hasOption ? preset.mediaType : '';
+  }
+  setDeepLinkParams(panel, preset.params ?? []);
+  if (opts?.updateSavedSelect !== false && savedSelect) {
+    savedSelect.value = preset.id;
+  }
+  syncSavedPresetDeleteButton(panel);
+}
+
+function findPresetById(id: string): DeeplinkPreset | undefined {
+  return savedPresets.find((p) => p.id === id);
+}
+
+export async function saveDeeplinkPreset(
+  fields: Pick<DeeplinkPreset, 'appId' | 'contentId' | 'mediaType' | 'params'>,
+  name: string
+): Promise<DeeplinkPreset> {
+  const trimmedName = name.trim();
+  if (!trimmedName) throw new Error(S.deeplink.enterPresetName);
+  if (!fields.appId.trim()) throw new Error(S.deeplink.appIdRequired);
+
+  const normalized = {
+    appId: fields.appId.trim(),
+    contentId: fields.contentId.trim(),
+    mediaType: fields.mediaType.trim(),
+    ...(fields.params && fields.params.length > 0 ? { params: fields.params } : {})
+  };
+  const key = presetKey(normalized);
+  const existing = savedPresets.find((p) => presetKey(p) === key);
+
+  let preset: DeeplinkPreset;
+  if (existing) {
+    existing.name = trimmedName;
+    preset = existing;
+  } else {
+    preset = {
+      id: generatePresetId(),
+      name: trimmedName,
+      ...normalized
+    };
+    savedPresets.push(preset);
+  }
+
+  savedPresets.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  await persistPresets();
+  refreshSavedPresetDropdowns();
+  return preset;
+}
+
+function setSaveModalError(message: string): void {
+  const el = document.getElementById('deeplinkSavePresetError');
+  setErrorLine(el?.closest('.deeplink-save-preset-modal-box'), el, message);
+}
+
+function closeSavePresetModal(modal: HTMLElement): void {
+  if (!modal.classList.contains('active')) return;
+  closeModalWithOriginMotion(modal, () => {
+    modal.classList.remove('active');
+    modal.setAttribute('aria-hidden', 'true');
+    setSaveModalError('');
+    if (pendingSaveResolve) {
+      pendingSaveResolve(null);
+      pendingSaveResolve = null;
+    }
+  });
+}
+
+function setupSaveModalOnce(): void {
+  const modal = document.getElementById('deeplinkSavePresetModal');
+  if (!(modal instanceof HTMLElement) || saveModalInitialized) return;
+  saveModalInitialized = true;
+
+  const nameInput = document.getElementById('deeplinkSavePresetName') as HTMLInputElement | null;
+  const confirmBtn = document.getElementById('deeplinkSavePresetConfirm');
+  const closeBtn = modal.querySelector('.deeplink-save-preset-modal-close');
+
+  closeBtn?.addEventListener('click', () => closeSavePresetModal(modal));
+  attachBackdropClickToClose(modal, () => closeSavePresetModal(modal));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal.classList.contains('active')) {
+      closeSavePresetModal(modal);
+    }
+  });
+
+  confirmBtn?.addEventListener('click', () => {
+    const name = nameInput?.value ?? '';
+    if (!name.trim()) {
+      setSaveModalError(S.deeplink.enterPresetName);
+      nameInput?.focus();
+      return;
+    }
+    setSaveModalError('');
+    const resolve = pendingSaveResolve;
+    pendingSaveResolve = null;
+    closeModalWithOriginMotion(modal, () => {
+      modal.classList.remove('active');
+      modal.setAttribute('aria-hidden', 'true');
+      resolve?.(name.trim());
+    });
+  });
+
+  nameInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') confirmBtn?.click();
+  });
+}
+
+export function promptSavePresetName(
+  suggestion: string,
+  opener?: HTMLElement | null
+): Promise<string | null> {
+  const modal = document.getElementById('deeplinkSavePresetModal');
+  const nameInput = document.getElementById('deeplinkSavePresetName') as HTMLInputElement | null;
+  if (!(modal instanceof HTMLElement) || !nameInput) {
+    return Promise.resolve(suggestion.trim() || null);
+  }
+
+  setupSaveModalOnce();
+  if (pendingSaveResolve) {
+    pendingSaveResolve(null);
+    pendingSaveResolve = null;
+  }
+
+  return new Promise((resolve) => {
+    pendingSaveResolve = resolve;
+    nameInput.value = suggestion;
+    setSaveModalError('');
+
+    openModalOverlayActiveFromOpener(modal, opener ?? null, () => {
+      modal.classList.add('active');
+      modal.setAttribute('aria-hidden', 'false');
+      nameInput.focus();
+      nameInput.select();
+      if (opener) setTimeout(() => opener.blur(), 0);
+    });
+  });
+}
+
+export function wireSavedPresetSelect(select: HTMLSelectElement, panel: HTMLElement): void {
+  select.addEventListener('change', () => {
+    const id = select.value;
+    if (!id) return;
+    const preset = findPresetById(id);
+    if (!preset) return;
+    applyPresetToPanel(panel, preset, { updateSavedSelect: true });
+  });
+}
+
+export function clearSavedPresetSelection(panel: HTMLElement): void {
+  const savedSelect = panel.querySelector('.deeplink-saved-select') as HTMLSelectElement | null;
+  if (savedSelect && savedSelect.value) savedSelect.value = '';
+}
+
+export async function initDeeplinkPresets(): Promise<void> {
+  if (window.roku?.getSetting) {
+    try {
+      const res = await window.roku.getSetting(SETTINGS_KEY);
+      if (res?.success && Array.isArray(res.value)) {
+        savedPresets = res.value
+          .map(normalizePreset)
+          .filter((item): item is DeeplinkPreset => item !== null);
+        savedPresets.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      }
+    } catch (e) {
+      rendererError('[Deep Link] Failed to load saved presets:', e);
+    }
+  }
+
+  setupSaveModalOnce();
+  refreshSavedPresetDropdowns();
+
+  // Live locale switch: the saved-preset `<select>`s are rebuilt imperatively (no data-i18n), so
+  // re-populate on switch to retranslate the placeholder (`savedPresetPlaceholder`). Saved preset
+  // names are user data and stay as-is; the current selection is preserved.
+  registerRetranslate(refreshSavedPresetDropdowns);
+}

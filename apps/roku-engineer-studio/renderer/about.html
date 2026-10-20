@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="about.windowTitle">About Roku Engineer Studio</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' file:;">
+  <link rel="stylesheet" href="about.css">
+</head>
+<body>
+  <div class="header">
+    <img id="appLogo" alt="Roku Engineer Studio" class="logo">
+    <div class="header-text">
+      <div class="app-name" data-i18n="about.appName">Roku Engineer Studio</div>
+      <div class="app-version"><span id="appVersion">—</span><span class="build-time" id="buildTime" hidden></span></div>
+    </div>
+  </div>
+  <div class="info-section">
+    <div class="info-toolbar">
+      <span class="info-title" data-i18n="about.appDetails">App Details</span>
+      <button type="button" class="icon-btn" id="btnCopy" title="Copy" aria-label="Copy" data-i18n-title="common.copy" data-i18n-aria-label="common.copy">
+        <svg class="ico-copy" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 5.5V3.5A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+        <svg class="ico-check" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div class="info-row">
+      <span class="info-label" data-i18n="about.apiVersionLabel">roku-engineer-studio-api Version:</span>
+      <span class="info-value" id="rdsApiVersion">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label" data-i18n="about.electronVersionLabel">Electron Version:</span>
+      <span class="info-value" id="electronVersion">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label" data-i18n="about.nodeVersionLabel">Node.js Version:</span>
+      <span class="info-value" id="nodeVersion">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label" data-i18n="about.chromiumVersionLabel">Chromium Version:</span>
+      <span class="info-value" id="chromiumVersion">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label" data-i18n="about.v8VersionLabel">V8 Version:</span>
+      <span class="info-value" id="v8Version">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label" data-i18n="about.osLabel">Operating System:</span>
+      <span class="info-value" id="osInfo">—</span>
+    </div>
+  </div>
+  <div class="copyright">
+    <div class="copyright-row" data-i18n="about.builtBy">
+      <a id="repoLink" href="#">roku-engineer-studio</a>
+      <span class="sep">·</span>
+      Built by <a id="authorLink" href="#">Cavanaugh Design Studio</a>
+    </div>
+    <div class="copyright-row">
+      <a id="siteLink" href="#">github.com/Cavanaugh-Design-Studio/Roku-Engineer</a>
+    </div>
+  </div>
+  <div class="buttons">
+    <button type="button" class="btn-secondary" id="btnIssue" data-i18n="about.submitIssue">Submit an Issue</button>
+    <button type="button" class="btn-primary" id="btnUpdate" data-i18n="app.checkForUpdates">Check for Updates</button>
+    <button type="button" class="btn-close" id="btnOk" data-i18n="common.close">Close</button>
+  </div>
+  <script type="module" src="./dist/components/about/about.js"></script>
+</body>
+</html>

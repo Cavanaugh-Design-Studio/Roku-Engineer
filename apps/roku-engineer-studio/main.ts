@@ -1,0 +1,1300 @@
+const { app, BrowserWindow, ipcMain, Menu, clipboard, dialog, shell } = require('electron');
+const pkg = require('./package.json');
+const {
+  isDiagnosticBuild,
+  applyDiagnosticCommandLineSwitches,
+  registerDiagnosticWebContents,
+  startDiagnosticTelemetry,
+  registerDiagnosticIpc
+} = require('./main/diagnostic-build');
+// Align Electron app name with productName so Hide/Quit match the bundle title (not package "name"),
+// and so app.getPath('userData') resolves to the right folder. MUST run before
+// requestSingleInstanceLock() below (before anything touches app.getPath/app.getName at all) —
+// Electron resolves and caches the userData directory from app.name on first access, so setting the
+// name even a few lines "too late" leaves settings/secrets/the MCP bridge descriptor silently
+// writing to the wrong, already-cached folder for the rest of the process's life. Confirmed live: a
+// packaged build with this call placed after requestSingleInstanceLock() still wrote its userData to
+// the lowercase package-name folder despite computing the right string.
+// electron-builder strips the "build" block from package.json when packaging (only "name" survives
+// inside app.asar), so pkg.build is undefined in a packaged build — the literal fallback must match
+// build.productName below. Diagnostic builds (scripts/build-diagnostic.ts) set productName via an
+// electron-builder CLI override that never reaches package.json either, so without this branch a
+// diagnostic install's userData would collide with the regular production install's.
+app.setName(
+  (pkg.build && pkg.build.productName) ||
+    (isDiagnosticBuild() ? 'Roku Engineer Studio Diagnostic' : 'Roku Engineer Studio')
+);
+
+// Single instance: a second launch (e.g. double-clicking / "Open With"-ing a log
+// file while the app is already open) hands its launch args to THIS instance via
+// 'second-instance' below instead of starting a redundant second app — which would
+// also mean two copies competing for the same device-connection ports. Nothing has
+// been set up yet at this point, so a hard exit is safe.
+if (!app.requestSingleInstanceLock()) {
+  console.error('[Main] Another instance of Roku Engineer Studio is already running. Exiting.');
+  process.exit(0);
+}
+
+const { IPC } = require('./shared/ipc/channels');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { resolveUnderBase, isPathUnderOneOf, resolveUserPathUnderOneOf } = require('roku-engineer-studio-platform/path-safe');
+
+// Import IPC handler modules
+const { setupIpcHandlers } = require('./main/ipc/index');
+const { registerLogViewerIpc, openLogFileViewerWindow } = require('./main/log-file-viewer-window');
+const {
+  registerNetworkSessionViewerIpc,
+  openNetworkSessionViewerWindow
+} = require('./main/network-session-viewer-window');
+// Pure argv-parsing helpers (no Electron dependency, so they're plain-Node
+// testable — see scripts/verify-launch-file-argv.ts) shared by the cold-start
+// check below and the 'second-instance' handler.
+const {
+  extractFilePathFromArgv,
+  classifyAssociatedFile,
+  LOG_VIEWER_ASSOCIATED_EXTENSIONS,
+  NETWORK_SESSION_ASSOCIATED_EXTENSIONS
+} = require('./main/launch-file-argv');
+
+/** Route a launch-associated file to whichever viewer its extension belongs
+ *  to. Returns the created window (or `undefined` if the path didn't resolve
+ *  to a known file type, or on a load error the viewer already surfaced). */
+function openAssociatedFile(
+  parent: import('electron').BrowserWindow | undefined,
+  filePath: string
+): import('electron').BrowserWindow | undefined {
+  const kind = classifyAssociatedFile(filePath);
+  if (kind === 'log') return openLogFileViewerWindow(parent, filePath);
+  if (kind === 'network-session') return openNetworkSessionViewerWindow(parent, filePath);
+  return undefined;
+}
+
+function extractAssociatedFilePathFromArgv(argv: string[]): string | null {
+  return (
+    extractFilePathFromArgv(argv, LOG_VIEWER_ASSOCIATED_EXTENSIONS) ??
+    extractFilePathFromArgv(argv, NETWORK_SESSION_ASSOCIATED_EXTENSIONS)
+  );
+}
+
+/** Set by the 'open-file' handler below when macOS launches us fresh via "Open
+ *  With" — that event can fire before `app.whenReady()` resolves, so the path is
+ *  queued here and consumed once startup reaches the point where opening a window
+ *  is possible (see `app.whenReady()` below). */
+let pendingAssociatedOpenPath: string | null = null;
+
+// macOS "Open With" / double-click a registered file: fires on a fresh launch
+// (queued until ready) AND on an already-running instance (opened immediately).
+// Windows/Linux get the file path via argv instead (handled at cold start and via
+// 'second-instance' below) — this event doesn't fire there.
+app.on('open-file', (event: { preventDefault: () => void }, filePath: string) => {
+  event.preventDefault();
+  if (app.isReady()) {
+    openAssociatedFile(mainWindow, filePath);
+  } else {
+    pendingAssociatedOpenPath = filePath;
+  }
+});
+
+// Windows/Linux "Open With" while already running: the OS starts a new process
+// with the file in its argv, which immediately loses the single-instance-lock
+// race above and exits — but first Electron relays its argv to us here.
+app.on('second-instance', (_event: unknown, argv: string[]) => {
+  const filePath = extractAssociatedFilePathFromArgv(argv);
+  if (filePath) {
+    openAssociatedFile(mainWindow, filePath);
+    return;
+  }
+  // Plain relaunch with no file — surface the existing window instead of doing
+  // nothing (the user's second click otherwise appears to have done nothing).
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+  }
+});
+const { registerConsoleSpillIpc } = require('./main/console-spill');
+const {
+  registerFiddleIpc,
+  openFiddleWindow,
+  broadcastFiddleTerminalData
+} = require('./main/fiddle-window');
+const { openActionScriptsViewerWindow } = require('./main/action-scripts-viewer-window');
+const { registerPortTerminalIpc } = require('./main/port-terminal-window');
+const { broadcastPrivacyModeToAllWindows } = require('./main/privacy-broadcast');
+const { S, setLocale, getLocale, effectiveLocale } = require('@shared/strings/index.js');
+const { broadcastLocaleToAllWindows } = require('./main/locale-broadcast');
+const { registerBsFiddleIpc } = require('./main/ipc/bs-fiddle-handlers');
+const { registerDemoAppIpc } = require('./main/ipc/demo-app-handlers');
+const { openStaticAnalysisWindow } = require('./main/static-analysis-window');
+const { registerStaticAnalysisIpc } = require('./main/ipc/static-analysis-handlers');
+const { killAllScaRuns } = require('./main/static-analysis/sca-runner');
+const { showAboutDialog, registerAboutIpc } = require('./main/about-dialog');
+const { setupAutoUpdater } = require('./main/auto-updater');
+// Handle for triggering the update-check flow from the "Check for Updates" menu
+// item (set once setupAutoUpdater runs at app-ready; the menu click reads it lazily).
+let updaterControls: import('./main/auto-updater').AutoUpdaterControls | null = null;
+/** Rebuilds the native application menu in the current locale; set when createWindow runs. */
+let rebuildAppMenu: (() => void) | null = null;
+const { showSettingsDialog } = require('./main/settings-dialog');
+const { registerSettingsWindowIpc } = require('./main/settings-window-ipc');
+const { initSettings, loadSettings, saveSettings, registerSettingsIpc } = require('./main/settings');
+const secretStore = require('./main/secret-store') as typeof import('./main/secret-store');
+const { dropRelayTargetIfPasswordRemoved } = require('./main/ipc/relay-handlers') as typeof import('./main/ipc/relay-handlers');
+const { forgetEphemeralRemoteLocations, pruneOrphanedRceAccounts } = require('./main/remote-locations') as typeof import('./main/remote-locations');
+const { startMcpBridge } = require('./main/mcp-bridge');
+const { getDeviceInfo, getDeviceId } = require('roku-engineer-studio-api');
+const { mainLog, mainWarn, mainError } = require('./main/log');
+
+// ============================================
+// File Logging for Debugging (File menu setting)
+// ============================================
+let debugLoggingEnabled = false;
+let logFile: string | null = null; // Set in app.whenReady from app.getPath('userData')
+type ConsoleFn = (...args: unknown[]) => void;
+let _originalConsoleLog: ConsoleFn | null = null;
+let _originalConsoleError: ConsoleFn | null = null;
+let _originalConsoleWarn: ConsoleFn | null = null;
+
+function enableFileLogging(filePath: string) {
+  // Idempotent: if already wrapped, a naive re-capture would store our wrapper as the
+  // "original" and permanently break console restoration in disableFileLogging.
+  if (_originalConsoleLog) return;
+  _originalConsoleLog = console.log;
+  _originalConsoleError = console.error;
+  _originalConsoleWarn = console.warn;
+  const userData = app ? app.getPath('userData') : '';
+  const logPathToUse = filePath && userData ? resolveUserPathUnderOneOf([userData], filePath) : null;
+
+  function writeLog(level: string, ...args: unknown[]) {
+    const timestamp = new Date().toISOString();
+    const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    const logLine = `[${timestamp}] [${level}] ${message}\n`;
+    try {
+      if (logPathToUse) fs.appendFileSync(logPathToUse, logLine);
+    } catch (e) { /* ignore */ }
+    if (level === 'LOG' && _originalConsoleLog) _originalConsoleLog.apply(console, args);
+    else if (level === 'ERROR' && _originalConsoleError) _originalConsoleError.apply(console, args);
+    else if (level === 'WARN' && _originalConsoleWarn) _originalConsoleWarn.apply(console, args);
+  }
+
+  console.log = (...args) => writeLog('LOG', ...args);
+  console.error = (...args) => writeLog('ERROR', ...args);
+  console.warn = (...args) => writeLog('WARN', ...args);
+
+  try {
+    if (logPathToUse) {
+      fs.writeFileSync(logPathToUse, `=== Roku Engineer Studio Debug Log at ${new Date().toISOString()} ===\n`);
+      _originalConsoleLog?.('Debug logging enabled. Log file:', logPathToUse);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function disableFileLogging() {
+  if (_originalConsoleLog && _originalConsoleError && _originalConsoleWarn) {
+    console.log = _originalConsoleLog;
+    console.error = _originalConsoleError;
+    console.warn = _originalConsoleWarn;
+    _originalConsoleLog = _originalConsoleError = _originalConsoleWarn = null;
+  }
+}
+
+/** Append one line to the debug log without invoking the console wrapper (diagnostic renderer capture). */
+function appendDebugLogLine(line: string) {
+  if (!logFile || !app) return;
+  const userData = app.getPath('userData');
+  const logPathToUse = resolveUserPathUnderOneOf([userData], logFile);
+  if (!logPathToUse) return;
+  try {
+    fs.appendFileSync(logPathToUse, line.endsWith('\n') ? line : `${line}\n`);
+  } catch {
+    /* ignore */
+  }
+}
+
+let mainWindow: import('electron').BrowserWindow | undefined;
+let developerModeEnabled = false;
+let privacyModeEnabled = false;
+
+// ============================================
+// Window zoom (View > Zoom In/Out/Reset, ⌘=/⌘-/⌘0, Ctrl+wheel)
+// ============================================
+//
+// All zoom helpers (clamp band, applyZoomFactor, zoomIn/Out/Reset, and the
+// per-window setupZoomGuards) live in `./main/window-zoom` so the Log Viewer
+// and Fiddle windows can register the same guards. See that module for the
+// rationale behind the clamp band and why pinch-zoom is disabled.
+const { zoomIn, zoomOut, resetZoom, setupZoomGuards } = require('./main/window-zoom');
+const { registerHamburgerMenuIpc } = require('./main/hamburger-menu');
+const { registerStripAuxWindowMenus } = require('./main/strip-aux-window-menu');
+
+if (isDiagnosticBuild()) {
+  applyDiagnosticCommandLineSwitches(app, app.getPath('userData'));
+}
+
+// Helper function to safely send messages to renderer.
+//
+// IMPORTANT: accessing `mainWindow.webContents` on a destroyed BrowserWindow
+// itself throws `TypeError: Object has been destroyed` (the getter proxies
+// into a native object that no longer exists). So the BrowserWindow's own
+// `isDestroyed()` MUST be checked first, before touching `webContents` at
+// all. The whole body is also wrapped in a try/catch as a last-resort guard
+// against teardown races (e.g. window destroyed between the isDestroyed()
+// check and `.send()` returning) — this used to crash the main process via
+// `uncaughtException` when a buffered telnet flush landed mid-teardown.
+function safeSendToRenderer(channel: string, data: unknown) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const wc = mainWindow.webContents;
+    if (!wc || wc.isDestroyed()) return false;
+    wc.send(channel, data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Fiddle windows tap into the same 8085 telnet stream as the main renderer.
+// Intercept the TelnetData send so we can also forward to any open Fiddle window.
+function safeSendToRendererWithFiddleMirror(channel: string, data: unknown) {
+  try {
+    if (channel === 'telnet:data' && data && typeof data === 'object') {
+      const payload = data as {
+        ip?: string;
+        data?: string;
+        isRemote?: boolean;
+        connectionId?: string;
+      };
+      if (typeof payload.ip === 'string' && typeof payload.data === 'string') {
+        try {
+          broadcastFiddleTerminalData({
+            ip: payload.ip,
+            data: payload.data,
+            isRemote: payload.isRemote,
+            connectionId: payload.connectionId
+          });
+        } catch (e) {
+          /* ignore fiddle broadcast errors */
+        }
+      }
+    }
+  } catch (e) {
+    /* ignore */
+  }
+  return safeSendToRenderer(channel, data);
+}
+
+/** Forwards a main-process crash to the main window's crash-report modal (see
+ *  renderer/modules/errors/). No-op if the main window doesn't exist yet/anymore. */
+function reportMainProcessError(error: unknown): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  const err = error instanceof Error ? error : new Error(String(error));
+  mainWindow.webContents.send(IPC.MainProcessError, {
+    message: err.message,
+    stack: err.stack || err.message,
+    timestamp: Date.now()
+  });
+}
+
+// Global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+  mainError('Uncaught Exception:', error);
+  const code = error && typeof error === 'object' && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
+  // Don't crash the app for network errors
+  if (code === 'EPIPE' || code === 'ECONNRESET' || code === 'ECONNREFUSED') {
+    mainLog('Network error caught globally, continuing...');
+    return;
+  }
+  reportMainProcessError(error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  mainError('Unhandled Rejection at:', promise, 'reason:', reason);
+  reportMainProcessError(reason);
+});
+
+/** Sandboxed preload may only require('electron'); API code is inlined in preload.bundled.cjs */
+function ensurePreloadBundle() {
+  const bundled = path.join(__dirname, 'preload.bundled.cjs');
+  if (fs.existsSync(bundled)) return;
+  mainLog('[Roku Engineer Studio] Running scripts/build (main, preload, HTML renderer)...');
+  const { execFileSync } = require('child_process');
+  execFileSync(process.execPath, [path.join(__dirname, 'scripts', 'build', 'index.js')], {
+    cwd: __dirname,
+    stdio: 'inherit',
+    env: process.env
+  });
+}
+
+/**
+ * Default UI: `renderer/index.html` + transpiled modules under `renderer/dist/`.
+ * Solid + Vite: ROKU_ENGINEER_SOLID_RENDERER=1 → http://127.0.0.1:5173 (run `npm run dev:solid`).
+ * Built Solid shell: ROKU_ENGINEER_SOLID_RENDERER=dist → renderer-vite-dist/index.html (after `npm run renderer:solid:build`).
+ */
+function loadMainRenderer(win: import('electron').BrowserWindow) {
+  const solidDev = process.env.ROKU_ENGINEER_SOLID_RENDERER === '1';
+  const solidDist = process.env.ROKU_ENGINEER_SOLID_RENDERER === 'dist';
+  const builtPath = path.join(__dirname, 'renderer-vite-dist', 'index.html');
+  const htmlRendererPath = path.join(__dirname, 'renderer', 'index.html');
+
+  if (solidDev) {
+    win.loadURL('http://127.0.0.1:5173/').catch((err: unknown) => {
+      mainError(
+        '[Roku Engineer Studio] Vite dev server not reachable at http://127.0.0.1:5173/. Run `npm run dev:solid` in apps/roku-engineer-studio (or `npm run start:solid` from repo root).',
+        err
+      );
+    });
+    return;
+  }
+  // Pass the resolved effective locale so the renderer applies it before its first
+  // paint (see app.ts init) — avoids the English → locale re-render flash on startup.
+  const localeQuery = { query: { locale: getLocale() } };
+  if (solidDist && fs.existsSync(builtPath)) {
+    win.loadFile(builtPath, localeQuery);
+    return;
+  }
+  win.loadFile(htmlRendererPath, localeQuery);
+}
+
+type AppWindowState = {
+  developerModeEnabled: boolean;
+  privacyModeEnabled: boolean;
+  debugLoggingEnabled: boolean;
+  logFile: string | null;
+};
+
+function createWindow(appState: AppWindowState, opts: { startHidden?: boolean } = {}) {
+  ensurePreloadBundle();
+  const preloadPath = path.resolve(__dirname, 'preload.bundled.cjs');
+  const isMac = process.platform === 'darwin';
+  /** Keep in sync with `--titlebar-height-base` in renderer/index.html */
+  const MACOS_TITLEBAR_HEIGHT = 38;
+  /** macOS traffic-light cluster visual height (centers in the custom title bar). */
+  const MACOS_TRAFFIC_LIGHT_HEIGHT = 14;
+  const macTrafficLightY = Math.round(MACOS_TITLEBAR_HEIGHT / 2 - MACOS_TRAFFIC_LIGHT_HEIGHT / 2);
+  const win = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: '#0a0a12',
+    // macOS: keep the native frame so traffic lights layer correctly with
+    // hiddenInset — frame:false + titleBarStyle is a known bad combo (HTML
+    // title-bar controls can paint focus rings over the close button).
+    // Win/Linux: frameless shell with custom min/max/close in the HTML title bar.
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: { x: 14, y: macTrafficLightY }
+        }
+      : { frame: false }),
+    show: false, // Don't show until ready - faster perceived startup
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  mainWindow = win;
+  win.webContents.on('will-prevent-unload', (event: { preventDefault: () => void }) => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'question', title: 'Unsaved project changes',
+      message: 'The project editor has unsaved changes.',
+      detail: 'Keep editing to save your work, or discard the changes and close.',
+      buttons: ['Keep editing', 'Discard changes and close'], defaultId: 0, cancelId: 0,
+    });
+    // For this Electron event, preventDefault explicitly allows the pending unload.
+    if (choice === 1) event.preventDefault();
+  });
+
+  // Win/Linux: hide the native menu bar on the main window (hamburger is the
+  // primary surface). Accelerators from setApplicationMenu still apply app-wide.
+  if (!isMac) {
+    win.setMenu(null);
+    // Removing the native menu also removes its F11 accelerator on Windows.
+    // Handle fullscreen before renderer shortcuts, including focused editors.
+    win.webContents.on('before-input-event', (event: import('electron').Event, input: import('electron').Input) => {
+      if (input.type === 'keyDown' && input.key === 'F11' &&
+          !input.control && !input.alt && !input.meta && !input.shift) {
+        event.preventDefault();
+        if (!input.isAutoRepeat) win.setFullScreen(!win.isFullScreen());
+      }
+    });
+  }
+
+  win.webContents.on('preload-error', (_event: unknown, failedPath: string, error: Error) => {
+    mainError('[Roku Engineer Studio] Preload failed:', failedPath, error);
+  });
+  registerDiagnosticWebContents(win.webContents);
+
+  // Show window as soon as it's ready (before content fully loads). Maximize
+  // first so it comes up filling the screen from startup (the 1400x900 above is
+  // the restored/unmaximized size the user gets when they un-maximize).
+  //
+  // `startHidden`: launched via "Open With" a log file with the app not already
+  // running — the user asked to see just the log file, so this window stays
+  // created-but-invisible (everything it wires up — menu, IPC handlers — still
+  // needs to exist) until something explicitly shows it (see the 'second-instance'
+  // relaunch-with-no-file fallback above, and the matching close-triggered quit in
+  // `app.whenReady()` below).
+  win.once('ready-to-show', () => {
+    if (opts.startHidden) return;
+    win.maximize();
+    win.show();
+  });
+
+  // Pinch-zoom disable, Ctrl+wheel re-clamp, and initial-factor broadcast —
+  // all in one helper shared with Log Viewer / Fiddle windows. See
+  // `./main/window-zoom` for rationale.
+  setupZoomGuards(win);
+
+  if (!isMac) {
+    const sendMaximizeState = () => {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC.MainWindowMaximizeChanged, win.isMaximized() || win.isFullScreen());
+      }
+    };
+    win.on('maximize', sendMaximizeState);
+    win.on('unmaximize', sendMaximizeState);
+    win.on('enter-full-screen', sendMaximizeState);
+    win.on('leave-full-screen', sendMaximizeState);
+  }
+
+  loadMainRenderer(win);
+
+  // Create application menu (rebuildable so a locale switch re-labels it live).
+  const applyApplicationMenu = () => {
+    const template = [
+    // macOS app menu (first menu is always the app name on Mac)
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        {
+          label: S.menu.about,
+          click: () => showAboutDialog(win)
+        },
+        { type: 'separator' },
+        {
+          label: S.menu.settings,
+          accelerator: 'CmdOrCtrl+,',
+          click: () => showSettingsDialog(win)
+        },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    }] : []),
+    // File menu
+    {
+      label: S.menu.file,
+      submenu: [
+        {
+          label: S.menu.openLogFile,
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: async () => {
+            const res = await dialog.showOpenDialog(win, {
+              title: S.menu.openLogFileDialogTitle,
+              properties: ['openFile'],
+              filters: [
+                {
+                  name: S.menu.filterLogAndText,
+                  extensions: ['log', 'txt', 'text', 'out', 'err', 'trace', 'rtf']
+                },
+                { name: S.menu.filterAllFiles, extensions: ['*'] }
+              ]
+            });
+            if (res.canceled || !res.filePaths?.length) return;
+            openLogFileViewerWindow(win, res.filePaths[0]!);
+          }
+        },
+        {
+          label: S.menu.openNetworkSession,
+          accelerator: 'CmdOrCtrl+Shift+N',
+          click: async () => {
+            const res = await dialog.showOpenDialog(win, {
+              title: S.menu.openNetworkSessionDialogTitle,
+              properties: ['openFile'],
+              filters: [
+                {
+                  name: S.menu.filterNetworkSession,
+                  // `.rds-network-inspector.json` bundles match the `json` filter.
+                  extensions: ['json', 'har', 'pcap', 'pcapng']
+                },
+                { name: S.menu.filterAllFiles, extensions: ['*'] }
+              ]
+            });
+            if (res.canceled || !res.filePaths?.length) return;
+            openNetworkSessionViewerWindow(win, res.filePaths[0]!);
+          }
+        },
+        {
+          label: S.menu.openFiddle,
+          accelerator: 'CmdOrCtrl+Shift+B',
+          click: () => {
+            // Ask the renderer for the current device snapshot, then open a fresh Fiddle window.
+            if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+              mainWindow.webContents.send(IPC.FiddleOpen, {});
+            } else {
+              openFiddleWindow(undefined, [], null);
+            }
+          }
+        },
+        {
+          label: S.menu.openStaticAnalysis,
+          accelerator: 'CmdOrCtrl+Shift+S',
+          click: () => {
+            openStaticAnalysisWindow(win);
+          }
+        },
+        {
+          label: S.menu.openActionScriptsViewer,
+          accelerator: 'CmdOrCtrl+Shift+A',
+          click: () => {
+            openActionScriptsViewerWindow(mainWindow);
+          }
+        },
+        // On macOS, Settings lives in the app menu (Roku Engineer Studio → Settings); listing
+        // it here too would duplicate it. Keep the File-menu entry on Windows / Linux where
+        // there is no app menu.
+        ...(isMac
+          ? []
+          : [
+              {
+                label: S.menu.settings,
+                accelerator: 'CmdOrCtrl+,',
+                click: () => showSettingsDialog(win)
+              }
+            ]),
+        { type: 'separator' },
+        {
+          // Available on all platforms (per request). Runs the same check flow as
+          // the automatic startup check: emitting `checking` clears any update
+          // banner currently shown, then the fresh result re-drives the notification.
+          label: S.menu.checkForUpdates,
+          click: () => {
+            void updaterControls?.checkForUpdates({ userInitiated: true });
+          }
+        },
+        {
+          label: S.menu.clearCacheAndReload,
+          click: () => clearCacheAndReload(appState)
+        },
+        { type: 'separator' },
+        {
+          label: S.menu.developerMode,
+          type: 'checkbox',
+          checked: developerModeEnabled,
+          accelerator: 'CmdOrCtrl+Shift+D',
+          click: (menuItem: import('electron').MenuItem) => {
+            developerModeEnabled = !!menuItem.checked;
+            // Notify renderer of the change
+            if (win && win.webContents) {
+              win.webContents.send('developer-mode-changed', developerModeEnabled);
+            }
+          }
+        },
+        {
+          label: S.menu.privacyMode,
+          type: 'checkbox',
+          checked: privacyModeEnabled,
+          accelerator: 'CmdOrCtrl+Shift+P',
+          click: (menuItem: import('electron').MenuItem) => {
+            privacyModeEnabled = !!menuItem.checked;
+            // Keep appState in sync so the system-handler `getPrivacyMode`
+            // invoke (used by freshly-opened Fiddle / Settings windows) reads
+            // the current value instead of the snapshot captured at startup.
+            if (appState) {
+              appState.privacyModeEnabled = privacyModeEnabled;
+            }
+            // Fan the toggle out to every open window (main, Fiddle, Settings,
+            // Session Viewer, …) so they mask IPs/serials in lockstep.
+            broadcastPrivacyModeToAllWindows(privacyModeEnabled);
+          }
+        },
+        {
+          label: S.menu.debugLogging,
+          type: 'checkbox',
+          checked: debugLoggingEnabled,
+          accelerator: 'CmdOrCtrl+Shift+L',
+          enabled: !isDiagnosticBuild(),
+          click: (menuItem: import('electron').MenuItem) => {
+            if (isDiagnosticBuild()) return;
+            debugLoggingEnabled = !!menuItem.checked;
+            if (appState) {
+              appState.debugLoggingEnabled = debugLoggingEnabled;
+              appState.logFile = logFile;
+            }
+            const settings = loadSettings();
+            settings.debugLoggingEnabled = debugLoggingEnabled;
+            saveSettings(settings);
+            if (debugLoggingEnabled && logFile) {
+              enableFileLogging(logFile);
+            } else {
+              disableFileLogging();
+            }
+            if (win && win.webContents) {
+              win.webContents.send('debug-logging-changed', debugLoggingEnabled);
+            }
+          }
+        },
+        ...(isDiagnosticBuild()
+          ? [
+              {
+                label: S.menu.openDiagnosticLogsFolder,
+                click: () => {
+                  void shell.openPath(app.getPath('userData'));
+                }
+              }
+            ]
+          : []),
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit' }
+      ]
+    },
+    {
+      label: S.menu.edit,
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: S.menu.view,
+      submenu: [
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        // Custom zoom handlers (instead of the built-in roles) so we can
+        // clamp to ZOOM_MIN_FACTOR..ZOOM_MAX_FACTOR and broadcast the new
+        // factor to the renderer for title-bar inverse-scaling.
+        //
+        // Use Electron's second click arg (the FOCUSED `BrowserWindow`)
+        // instead of the captured main `win`, so View > Zoom and the
+        // Cmd+/-/0 accelerators target whichever window the user is
+        // looking at — including the Log Viewer and Fiddle windows.
+        // Fall back to the main window if no window has focus (very
+        // edge-casey, but keeps the menu functional).
+        {
+          label: S.menu.actualSize,
+          accelerator: 'CmdOrCtrl+0',
+          click: (_mi: import('electron').MenuItem, focused?: import('electron').BrowserWindow) =>
+            resetZoom(focused || win)
+        },
+        {
+          label: S.menu.zoomIn,
+          accelerator: 'CmdOrCtrl+Plus',
+          click: (_mi: import('electron').MenuItem, focused?: import('electron').BrowserWindow) =>
+            zoomIn(focused || win)
+        },
+        {
+          // Second binding — Cmd+= without Shift. Electron's
+          // built-in `zoomIn` role registers both `CmdOrCtrl+Plus` and
+          // `CmdOrCtrl+=`; we mirror that so the unshifted top-row "="
+          // works too.
+          label: S.menu.zoomInAlt,
+          accelerator: 'CmdOrCtrl+=',
+          visible: false,
+          acceleratorWorksWhenHidden: true,
+          click: (_mi: import('electron').MenuItem, focused?: import('electron').BrowserWindow) =>
+            zoomIn(focused || win)
+        },
+        {
+          label: S.menu.zoomOut,
+          accelerator: 'CmdOrCtrl+-',
+          click: (_mi: import('electron').MenuItem, focused?: import('electron').BrowserWindow) =>
+            zoomOut(focused || win)
+        },
+        { type: 'separator' },
+        { role: 'togglefullscreen' }
+      ]
+    },
+    {
+      label: S.menu.window,
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { role: 'close' }
+      ]
+    },
+    // Help menu only on Windows / Linux — macOS already has About in the app menu and
+    // Settings is also in the app menu, so a Help menu would either be empty or
+    // duplicate those entries.
+    ...(isMac
+      ? []
+      : [
+          {
+            label: S.menu.help,
+            submenu: [
+              {
+                label: S.menu.about,
+                click: () => showAboutDialog(win)
+              }
+            ]
+          }
+        ])
+  ];
+
+    const menu = Menu.buildFromTemplate(template);
+    Menu.setApplicationMenu(menu);
+  };
+  rebuildAppMenu = applyApplicationMenu;
+  applyApplicationMenu();
+}
+
+/**
+ * IPC surface for the encrypted secret store. The renderer hydrates an
+ * in-memory cache from `secrets:get-all` once at startup, then issues
+ * fire-and-forget `set` / `delete` calls on user actions. We never return
+ * ciphertext to the renderer — the same trust boundary as the previous
+ * `localStorage` scheme (the renderer always had cleartext anyway).
+ */
+function registerSecretsIpc(ipc: typeof ipcMain) {
+  ipc.handle(IPC.SecretsStatus, async () => {
+    try {
+      return { success: true, ...secretStore.getStatus() };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  ipc.handle(IPC.SecretsGetAll, async () => {
+    try {
+      const status = secretStore.getStatus();
+      return { success: true, entries: secretStore.getAllPasswords(), ...status };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  ipc.handle(IPC.SecretsSetPassword, async (_event: import('electron').IpcMainInvokeEvent, payload: { serial?: unknown; password?: unknown }) => {
+    const serial = typeof payload?.serial === 'string' ? payload.serial : '';
+    const password = typeof payload?.password === 'string' ? payload.password : '';
+    if (!serial) return { success: false, error: 'Missing serial' };
+    try {
+      secretStore.setPassword(serial, password);
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  ipc.handle(IPC.SecretsDeletePassword, async (_event: import('electron').IpcMainInvokeEvent, payload: { serial?: unknown }) => {
+    const serial = typeof payload?.serial === 'string' ? payload.serial : '';
+    if (!serial) return { success: false, error: 'Missing serial' };
+    try {
+      secretStore.deletePassword(serial);
+      // Every "password removed" path (Dev App, sideloading, Action Scripts import, …)
+      // funnels through this one handler — a relay target with no password on file can't
+      // authenticate, so drop it here if it's currently targeted, rather than needing every
+      // caller of removePassword() to know about the relay.
+      dropRelayTargetIfPasswordRemoved(serial, undefined);
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  ipc.handle(IPC.SecretsMigrateLegacy, async (_event: import('electron').IpcMainInvokeEvent, payload: { entries?: unknown }) => {
+    const entries =
+      payload && typeof payload.entries === 'object' && payload.entries !== null
+        ? (payload.entries as Record<string, string>)
+        : {};
+    try {
+      const result = secretStore.migrateLegacy(entries);
+      return { success: true, ...result };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  ipc.handle(IPC.SecretsClearAll, async () => {
+    try {
+      secretStore.clearAll();
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+}
+
+app.whenReady().then(() => {
+  require('./main/engineer-service').registerEngineerWorkspace();
+  registerStripAuxWindowMenus(app);
+  initSettings(app);
+  const earlySettings = loadSettings();
+  // The last language preference broadcast to renderers. Tracked in memory (NOT re-read from the
+  // settings file) so the SetLocale handler can no-op an unchanged save: the Settings save persists
+  // `language` to disk *before* it calls setLanguage(), so a file comparison would always look
+  // "unchanged" and break the live switch. Seeded from the persisted value at startup.
+  let lastBroadcastLocalePref =
+    typeof earlySettings['language'] === 'string' && earlySettings['language'].trim()
+      ? earlySettings['language'].trim()
+      : 'system';
+  // Resolve the persisted language preference against the OS locale so the native menu
+  // (built in createWindow below) renders in the chosen locale from first paint.
+  setLocale(effectiveLocale(lastBroadcastLocalePref, app.getLocale()));
+  const rememberPasswordsInKeychain = earlySettings.rememberPasswordsInKeychain === true;
+  secretStore.init(app, { enabled: rememberPasswordsInKeychain });
+  // Startup sweep of "Forget it on App Quit/Close" locations (crash safety — a hard kill skips
+  // before-quit). Needs the secret store up: an RCE location's stored token goes with it.
+  forgetEphemeralRemoteLocations();
+  // Then drop RCE account tokens whose location is gone — normally the settings:set cascade keeps
+  // the two stores in step (main/settings.ts); this catches a crash mid-write and data left by
+  // builds that predate the cascade. See main/rce-account-orphans.ts.
+  pruneOrphanedRceAccounts();
+  registerAboutIpc(ipcMain, clipboard, shell);
+  updaterControls = setupAutoUpdater(app, ipcMain, () => mainWindow);
+  registerLogViewerIpc(ipcMain);
+  registerNetworkSessionViewerIpc(ipcMain);
+  registerConsoleSpillIpc(ipcMain, app);
+  registerSettingsIpc(ipcMain);
+  registerSecretsIpc(ipcMain);
+  registerFiddleIpc(ipcMain, () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null));
+  registerBsFiddleIpc(ipcMain);
+  registerDemoAppIpc(ipcMain);
+  registerStaticAnalysisIpc(ipcMain, app);
+  registerPortTerminalIpc(ipcMain, () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null));
+
+  // Current language preference, so a window opened while a non-default locale is active can
+  // resolve + apply it on load (each renderer has its own catalog instance).
+  ipcMain.handle(IPC.GetLocale, () => {
+    const settings = loadSettings();
+    const pref = settings['language'];
+    return typeof pref === 'string' && pref.trim() ? pref.trim() : 'system';
+  });
+
+  // Language switch from the Settings dropdown: persist the preference, re-label the native
+  // menu in the new locale, and fan the change out so every window retranslates in place.
+  ipcMain.handle(IPC.SetLocale, (_event: import('electron').IpcMainInvokeEvent, code: unknown) => {
+    const pref = typeof code === 'string' && code.trim() ? code.trim() : 'system';
+    // No-op when the preference is unchanged since the last broadcast. The Settings → General "Save"
+    // button calls setLanguage() on EVERY save, so without this guard a save made for any other reason
+    // would broadcast LocaleChanged and force a full retranslate (+ redundant chart repaint) in every
+    // window for nothing. Compare against the in-memory value, not the file — the save already
+    // persisted `language` before this ran, so a file comparison would miss a genuine change.
+    if (pref === lastBroadcastLocalePref) return { success: true, pref, unchanged: true };
+    lastBroadcastLocalePref = pref;
+    const settings = loadSettings();
+    settings['language'] = pref;
+    saveSettings(settings);
+    setLocale(effectiveLocale(pref, app.getLocale()));
+    rebuildAppMenu?.();
+    broadcastLocaleToAllWindows(pref);
+    return { success: true, pref };
+  });
+
+  // Main renderer (e.g. the Network Inspector port-conflict modal, the Try Demo App modal's
+  // "Turn this off in Settings" link) asks to open Settings, optionally navigated straight to a
+  // section and/or with a specific row scrolled-to and highlighted.
+  ipcMain.on(
+    IPC.SettingsOpen,
+    (event: import('electron').IpcMainEvent, payload: { section?: unknown; highlightId?: unknown }) => {
+      const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+      if (!parent) return;
+      const section = typeof payload?.section === 'string' ? payload.section : undefined;
+      const highlightId = typeof payload?.highlightId === 'string' ? payload.highlightId : undefined;
+      showSettingsDialog(parent, section, highlightId);
+    }
+  );
+
+  // Renderer replies to the "Open Fiddle" menu click with the device snapshot.
+  ipcMain.on(IPC.FiddleOpen, (event: import('electron').IpcMainEvent, payload: { devices?: unknown; initialDeviceId?: string | null }) => {
+    const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    const devices = Array.isArray(payload?.devices) ? payload!.devices : [];
+    const initialId = payload?.initialDeviceId ?? null;
+    openFiddleWindow(parent || undefined, devices, initialId);
+  });
+
+  // Files dropped onto the main window (renderer/modules/utils/main-window-file-drop.ts already
+  // resolved each dropped File to a real path via webUtils.getPathForFile in preload). Open every
+  // recognized one in its associated viewer, skip the rest, and report back what happened so the
+  // renderer can toast a summary.
+  ipcMain.handle(
+    IPC.OpenDroppedFiles,
+    (
+      event: import('electron').IpcMainInvokeEvent,
+      payload: { filePaths?: unknown }
+    ): { opened: Array<{ name: string; kind: 'log' | 'network-session' }>; unsupported: string[] } => {
+      const filePaths = Array.isArray(payload?.filePaths)
+        ? payload.filePaths.filter((p): p is string => typeof p === 'string')
+        : [];
+      const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+      const opened: Array<{ name: string; kind: 'log' | 'network-session' }> = [];
+      const unsupported: string[] = [];
+      for (const filePath of filePaths) {
+        const kind = classifyAssociatedFile(filePath);
+        if (!kind) {
+          unsupported.push(path.basename(filePath));
+          continue;
+        }
+        openAssociatedFile(parent || undefined, filePath);
+        opened.push({ name: path.basename(filePath), kind });
+      }
+      return { opened, unsupported };
+    }
+  );
+
+  // "View and Manage Action Scripts" window shows its OWN device picker but owns no device state.
+  // Relay its list request to the main window's renderer (which does), optionally running a scan,
+  // and pass the reply back. Correlate concurrent requests by an incrementing id.
+  let actionScriptDeviceOptReqSeq = 0;
+  function requestApplyDeviceOptionsFromMain(rescan: boolean): Promise<Array<{ id: string; label: string }>> {
+    return new Promise((resolve) => {
+      if (
+        !mainWindow || mainWindow.isDestroyed() ||
+        !mainWindow.webContents || mainWindow.webContents.isDestroyed()
+      ) {
+        resolve([]);
+        return;
+      }
+      const reqId = ++actionScriptDeviceOptReqSeq;
+      const onReply = (_e: import('electron').IpcMainEvent, payload: unknown): void => {
+        const p = payload as { reqId?: number; options?: Array<{ id: string; label: string }> } | undefined;
+        if (!p || p.reqId !== reqId) return;
+        clearTimeout(timer);
+        ipcMain.removeListener(IPC.ActionScriptProvideDeviceOptions, onReply);
+        resolve(Array.isArray(p.options) ? p.options : []);
+      };
+      // A rescan runs a full network + relay scan, so allow generous headroom before giving up.
+      const timer = setTimeout(() => {
+        ipcMain.removeListener(IPC.ActionScriptProvideDeviceOptions, onReply);
+        resolve([]);
+      }, 30000);
+      ipcMain.on(IPC.ActionScriptProvideDeviceOptions, onReply);
+      mainWindow.webContents.send(IPC.ActionScriptRequestDeviceOptions, { reqId, rescan });
+    });
+  }
+  ipcMain.handle(IPC.RokuActionScriptGetDeviceOptions, () => requestApplyDeviceOptionsFromMain(false));
+  ipcMain.handle(IPC.RokuActionScriptRescanDeviceOptions, () => requestApplyDeviceOptionsFromMain(true));
+
+  // The viewer's picker chose a device: bring the main window forward and have its renderer connect /
+  // activate that device, switch to Action Scripts, and load the script into the device's Builder.
+  ipcMain.handle(IPC.RokuActionScriptApplyToDevice, (_event: import('electron').IpcMainInvokeEvent, payload: unknown) => {
+    const p = payload as { deviceId?: unknown; json?: unknown } | undefined;
+    if (
+      mainWindow && !mainWindow.isDestroyed() &&
+      mainWindow.webContents && !mainWindow.webContents.isDestroyed() &&
+      p && typeof p.deviceId === 'string' && typeof p.json === 'string'
+    ) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+      mainWindow.webContents.send(IPC.ActionScriptApplyToDeviceOnMain, { deviceId: p.deviceId, json: p.json });
+      return { success: true };
+    }
+    return { success: false };
+  });
+
+  // Settings window's "Demo App" button (shown when the titlebar button is toggled off): bring
+  // the main window forward and have it open the same picker modal the titlebar button opens.
+  ipcMain.handle(IPC.DemoAppRequestOpen, () => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+      mainWindow.webContents.send(IPC.DemoAppOpenOnMain);
+      return { success: true };
+    }
+    return { success: false };
+  });
+
+  // Title-bar zoom indicator (`-` / `+` buttons in the renderer): route the
+  // direction through the same `zoomIn`/`zoomOut`/`resetZoom` helpers as the
+  // View menu so clamp + `AppZoomChanged` broadcast stay in one place.
+  ipcMain.on(IPC.AppZoomChange, (event: import('electron').IpcMainEvent, payload: { direction?: unknown }) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    if (!win) return;
+    const direction = payload?.direction;
+    if (direction === 'in') zoomIn(win);
+    else if (direction === 'out') zoomOut(win);
+    else if (direction === 'reset') resetZoom(win);
+  });
+
+  // Load debug logging from settings (no file-on-Desktop needed)
+  const settings = loadSettings();
+  debugLoggingEnabled = isDiagnosticBuild() ? true : settings.debugLoggingEnabled === true;
+  if (isDiagnosticBuild()) {
+    developerModeEnabled = true;
+  }
+  const userDataPath = app.getPath('userData');
+  const resolvedLogFile =
+    resolveUnderBase(userDataPath, 'roku-engineer-studio-debug.log') ?? path.join(userDataPath, 'roku-engineer-studio-debug.log');
+  logFile = resolvedLogFile;
+  if (debugLoggingEnabled) {
+    enableFileLogging(resolvedLogFile);
+  }
+
+  // Create appState before createWindow so the menu can keep it in sync when toggling Debug Logging
+  const appState = {
+    developerModeEnabled,
+    privacyModeEnabled,
+    debugLoggingEnabled,
+    logFile
+  };
+
+  // Cold-launch "Open With" a log file or network session: macOS queued a path via
+  // 'open-file' before we were ready (see the top-level handler), or we were
+  // launched directly with a file argument (Windows/Linux). In that case, show
+  // only the relevant viewer — the main window still gets fully created and wired
+  // (menus, IPC, etc. all assume it exists), it just stays hidden until the user
+  // explicitly asks for it.
+  const coldStartFilePath = pendingAssociatedOpenPath ?? extractAssociatedFilePathFromArgv(process.argv);
+  pendingAssociatedOpenPath = null;
+  createWindow(appState, { startHidden: !!coldStartFilePath });
+  if (coldStartFilePath) {
+    const viewer = openAssociatedFile(undefined, coldStartFilePath);
+    // If closing this window leaves nothing visible (the main window was never
+    // shown, and no other viewer window from a follow-up Open-With is still
+    // open), quit. `window-all-closed` doesn't cover this on its own since the
+    // hidden main window still technically exists — without this, closing the
+    // only visible window would leave an invisible, unquittable process behind.
+    viewer?.once('closed', () => {
+      const anyVisible = BrowserWindow.getAllWindows().some((w: import('electron').BrowserWindow) => w.isVisible());
+      if (!anyVisible) app.quit();
+    });
+  }
+
+  registerHamburgerMenuIpc(ipcMain, {
+    dialog,
+    getMainWindow: () => mainWindow,
+    getDebugLogging: () => debugLoggingEnabled,
+    setDebugLogging: (enabled: boolean) => {
+      if (isDiagnosticBuild() && !enabled) return;
+      debugLoggingEnabled = enabled;
+      appState.debugLoggingEnabled = debugLoggingEnabled;
+      appState.logFile = logFile;
+      const nextSettings = loadSettings();
+      nextSettings.debugLoggingEnabled = debugLoggingEnabled;
+      saveSettings(nextSettings);
+      if (debugLoggingEnabled && logFile) {
+        enableFileLogging(logFile);
+      } else {
+        disableFileLogging();
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(IPC.DebugLoggingChanged, debugLoggingEnabled);
+      }
+    },
+    showAboutDialog,
+    showSettingsDialog,
+    openLogFileViewer: openLogFileViewerWindow,
+    openFiddle: () => {
+      if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send(IPC.FiddleOpen, {});
+      } else {
+        openFiddleWindow(undefined, [], null);
+      }
+    },
+    clearCacheAndReload: () => clearCacheAndReload(appState)
+  });
+
+  setupIpcHandlers(mainWindow, getDeviceInfo, getDeviceId, safeSendToRendererWithFiddleMirror, dialog, Menu, clipboard, app, appState);
+
+  // Always register a fallback so the renderer's isDiagnosticBuild() invoke never
+  // throws "No handler registered for 'is-diagnostic-build'". In diagnostic builds
+  // registerDiagnosticIpc removes this and installs the real handler.
+  ipcMain.handle(IPC.IsDiagnosticBuild, async () => ({ enabled: false }));
+
+  if (isDiagnosticBuild()) {
+    registerDiagnosticIpc(ipcMain, shell, () => app.getPath('userData'));
+    startDiagnosticTelemetry({
+      userDataDir: userDataPath,
+      appendMainLog: appendDebugLogLine,
+      getMainWindow: () => mainWindow,
+      getExtraSnapshot: () => {
+        try {
+          const { getNetworkInspectorService } = require('./main/network-inspector/index');
+          const st = getNetworkInspectorService(safeSendToRenderer).getStatus();
+          return {
+            networkInspector: {
+              enabled: st.enabled,
+              captureActive: st.captureActive,
+              captureInterface: st.captureInterface,
+              mitmActive: st.mitmActive,
+              mitmEnabled: st.mitmEnabled,
+              packetsCaptured: st.packetsCaptured,
+              eventsBuffered: st.eventsBuffered,
+              hotspotInterfaceDetected: st.hotspotInterfaceDetected,
+              lastError: st.lastError
+            }
+          };
+        } catch {
+          return {};
+        }
+      }
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('developer-mode-changed', true);
+      mainWindow.webContents.send(IPC.DebugLoggingChanged, true);
+    }
+  }
+
+  startMcpBridge({
+    app,
+    ipcMain,
+    getActiveWebContents: () =>
+      mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null
+  });
+
+  registerSettingsWindowIpc(ipcMain, Menu, dialog, {
+    getAppState: () => appState,
+    getSecretStoreStatus: () => secretStore.getStatus(),
+    applyModesAfterSave: (d: boolean, p: boolean, dbg: boolean) => {
+      developerModeEnabled = d;
+      privacyModeEnabled = p;
+      debugLoggingEnabled = dbg;
+      appState.developerModeEnabled = d;
+      appState.privacyModeEnabled = p;
+      appState.debugLoggingEnabled = dbg;
+      appState.logFile = logFile;
+      if (dbg && logFile) {
+        enableFileLogging(logFile);
+      } else {
+        disableFileLogging();
+      }
+    },
+    applyRememberPasswordsInKeychain: (next: boolean) => {
+      // Flipping the toggle just changes the on-disk encoding (encrypted via
+      // `safeStorage` when on, JSON-encoded plaintext when off — see
+      // `main/secret-store.ts`). The file is re-written in the new mode so
+      // the next cold launch reads it back correctly. "Clear Cache and
+      // Reload" / the explicit clearAll IPC is the only thing that actually
+      // deletes remembered entries.
+      secretStore.setEnabled(next);
+    },
+    notifyRenderer: (channel: string, data: unknown) => {
+      // Privacy Mode must reach every open window (main, Fiddle, Settings,
+      // Session Viewer, …), not just the main renderer — each masks off it.
+      if (channel === IPC.PrivacyModeChanged) {
+        broadcastPrivacyModeToAllWindows(!!data);
+        return;
+      }
+      safeSendToRenderer(channel, data);
+    }
+  });
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow(appState);
+      // Setup IPC handlers again if window was recreated
+      setupIpcHandlers(mainWindow, getDeviceInfo, getDeviceId, safeSendToRendererWithFiddleMirror, dialog, Menu, clipboard, app, appState);
+    }
+  });
+});
+
+// Quit when the last window closes on all platforms (including macOS).
+// Otherwise on macOS the process stays alive after the red close button and
+// main-process Telnet/WebSocket sessions remain open until Cmd+Q / Quit.
+app.on('window-all-closed', () => {
+  app.quit();
+});
+
+// Close any live BrightScript debug sessions (8081 control + IO sockets) on quit,
+// rather than leaving them to be reaped by process exit. Best-effort; no-op unless
+// someone actually attached the debugger this session.
+let fiddleQuitCleanupDone = false;
+app.on('before-quit', (event: Electron.Event) => {
+  try {
+    (require('./main/ipc/debugger-handlers') as { teardownDebuggerSessions: () => void }).teardownDebuggerSessions();
+  } catch {
+    /* best-effort teardown */
+  }
+  try {
+    killAllScaRuns();
+  } catch {
+    /* best-effort teardown */
+  }
+  // Never leave the Fiddle channel behind on a device: `before-quit` is synchronous, so hold the
+  // quit (once) until the bounded delete has settled, then quit for real.
+  if (!fiddleQuitCleanupDone) {
+    try {
+      const pending = (require('./main/ipc/bs-fiddle-handlers') as typeof import('./main/ipc/bs-fiddle-handlers')).settleFiddleCleanupsForQuit();
+      if (pending) {
+        event.preventDefault();
+        void pending.finally(() => {
+          fiddleQuitCleanupDone = true;
+          app.quit();
+        });
+        // The purge below runs on the re-fired `before-quit` instead — the Fiddle delete re-resolves
+        // RCE credentials at delete time, so its account token must still exist here.
+        return;
+      }
+    } catch {
+      /* best-effort teardown */
+    }
+  }
+  // Drop session-only ("Forget it on App Quit/Close") remote locations last, once the quit really
+  // proceeds: it deletes RCE account tokens, which the Fiddle cleanup above may still need.
+  try {
+    forgetEphemeralRemoteLocations();
+  } catch {
+    /* best-effort */
+  }
+});
+
+// ============================================
+// Clear Cache and Reload
+// ============================================
+async function clearCacheAndReload(appState: AppWindowState) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    title: 'Clear Cache and Reload',
+    message: 'Clear all Cached Data and Reload the app?',
+    detail: 'This will clear: saved passwords, Remote Locations, device list state, minimized/collapsed state, and any other stored data. The app will then Reload. This cannot be undone.',
+    buttons: ['Cancel', 'Clear and Reload'],
+    defaultId: 0,
+    cancelId: 0
+  });
+  if (response !== 1) return;
+  try {
+    const wc = mainWindow.webContents;
+    if (wc && !wc.isDestroyed()) {
+      await wc.session.clearStorageData({
+        storages: ['cookies', 'localstorage', 'cachestorage', 'indexdb', 'filesystem']
+      });
+    }
+    saveSettings({});
+    // Encrypted dev-password store lives outside the renderer's `localStorage`
+    // (under `<userData>/secrets/`), so `session.clearStorageData` doesn't
+    // touch it. Wipe it here so "Clear Cache and Reload" really does clear
+    // *all* persisted data.
+    try {
+      secretStore.clearAll();
+    } catch (e) {
+      mainWarn('[main] secretStore.clearAll failed:', e);
+    }
+    // Keep in-memory/menu state in sync with the now-empty settings file so the
+    // renderer can't read stale developer/privacy/debug flags from the main process.
+    // appState is mirrored here too because `registerSettingsWindowIpc`
+    // exposes it via `getAppState`; leaving it stale would cause the Settings
+    // window to read pre-clear values.
+    developerModeEnabled = false;
+    privacyModeEnabled = false;
+    appState.developerModeEnabled = false;
+    appState.privacyModeEnabled = false;
+    if (debugLoggingEnabled) {
+      debugLoggingEnabled = false;
+      disableFileLogging();
+    }
+    appState.debugLoggingEnabled = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.reload();
+    }
+  } catch (e) {
+    mainError('Clear Cache failed:', e);
+    const msg = e instanceof Error ? e.message : String(e);
+    dialog.showErrorBox('Clear Cache failed', msg);
+  }
+}
+
+// Settings and About IPC are registered in app.whenReady (see below).

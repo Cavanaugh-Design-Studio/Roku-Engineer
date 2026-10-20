@@ -1,0 +1,2007 @@
+import { errMessage } from '@shared/platform/err-util.js';
+import { rendererWarn, rendererError } from '../utils/logger.js';
+import { type StructuredConsolePayload } from '../console-log/structured-log-detect.js';
+import { createConsoleDeferredHeavyDrain } from '../console-log/console-deferred-heavy-drain.js';
+import { mountConsoleLogSurface } from '../console-log/mount-console-log-surface.js';
+import { buildConsoleLogLineElement } from '../console-log/console-log-file-view.js';
+import { buildConsoleFindBarElement } from '../console-log/console-find-bar-markup.js';
+import { attachHeaderSearchResize } from '../ui/header-search-resize.js';
+import { searchWidthKey } from '../ui/search-storage-keys.js';
+import {
+  buildVisibleLogText,
+  selectVisibleLogEntries
+} from '../console-log/console-visible-log-text.js';
+import { CONSOLE_VIEWER_CLOSED_EVENT } from '../console-log/console-viewer-bridge.js';
+import { setupTelnetDebugSidebar } from './telnet-debug-sidebar.js';
+import {
+  appendTelnetChunk,
+  takeTelnetTail,
+  type TelnetLineBufferState
+} from './telnet-console-buffer.js';
+import {
+  createConsoleLineParserState,
+  parseConsoleLineBatch,
+  type ParsedTelnetEntry
+} from '../console-log/console-line-parser.js';
+import { createWorkerPool, type WorkerPool } from '../concurrency/worker-pool.js';
+import type { TelnetParseResult } from './telnet-parse.worker.js';
+import { icon, setSafeHTML } from '../index.js';
+import {
+  openConsoleAnalyticsModal,
+  type ConsoleAnalyticsHandle,
+  type ConsoleAnalyticsSnapshot
+} from '../console-log/console-analytics-modal.js';
+import { revealAndFlashLine } from '../console-log/reveal-occurrence.js';
+import {
+  recognizeBrsIssue,
+  computeConsoleFindings,
+  detectBrsCrashes,
+  type ConsoleFindings
+} from '@shared/console/brightscript-error-catalog.js';
+import { detectBeaconTimings, CONSOLE_REPLAY_WINDOW_MS, DEBUGGER_WAITING_RE, DEBUGGER_CLAIMED_RE, DEBUGGER_ATTACHED_RE } from '@shared/console/roku-beacons.js';
+import {
+  debugTelnetIpcTargetsDevice,
+  debugEventTargetsDevice,
+  type DebugTelnetIpcPayload
+} from '@shared/ipc/debug-telnet-connection-id.js';
+import { S } from '@shared/strings/index.js';
+
+export type TelnetConsoleDevice = { deviceName?: string; modelName?: string; ip: string };
+
+export type TelnetConsoleApi = {
+  ip: string;
+  isRemote?: boolean;
+  serverUrl?: string | null;
+  /** False when a remote device's server reports `capabilities.debugger === false` — the debug
+   *  sidebar disables itself instead of attempting a session the server can't run. Always true
+   *  for local devices (RDS's own in-process session, no negotiation needed). */
+  debuggerSupported?: boolean;
+  telnetConnect: (options?: { skipRelayBuffer?: boolean }) => Promise<{ success: boolean; error?: string }>;
+  telnetDisconnect: () => Promise<unknown>;
+  /** Absent for RCE devices (no telnet-status IPC); used to adopt a socket main already holds. */
+  telnetStatus?: () => Promise<{ connected?: boolean } | undefined>;
+  /** Remote relay only — clears the server-side gap buffer without closing 8085. */
+  telnetClearRelayBuffer?: () => Promise<{ success?: boolean; error?: string; clearedBytes?: number }>;
+};
+
+export type TelnetLogLine = { text: string; timestamp: string | null; type: string };
+
+export type TelnetLogSnapshot = {
+  lines: TelnetLogLine[];
+  /** Opaque cursor: pass as `afterCursor` on the next call to get only new lines. */
+  cursor: number;
+  /** Total lines in the scrollback buffer at time of call. */
+  totalLines: number;
+  connected: boolean;
+};
+
+export type TelnetPanelElement = HTMLElement & {
+  _telnetCleanup?: () => void;
+  /** Async: flushes any queued-but-not-yet-parsed lines through the per-connection worker first. */
+  getTelnetLogText?: () => Promise<string>;
+  /**
+   * Cursor-aware log snapshot for MCP agents.
+   * - `afterCursor` (default 0): skip lines already seen; pass back the previous `cursor`.
+   * - `maxLines` (default 500, capped at 2000): max lines returned in one call.
+   */
+  getTelnetLogSnapshot?: (afterCursor?: number, maxLines?: number) => Promise<TelnetLogSnapshot>;
+  /**
+   * Console Monitor findings — the recognized BrightScript issues in the buffer, aggregated exactly as
+   * the Console Monitor modal renders them (via the shared `computeConsoleFindings`). Backs the
+   * `console_monitor_findings` MCP tool.
+   */
+  getConsoleMonitorFindings?: () => Promise<
+    ConsoleFindings & {
+      connected: boolean;
+      scannedLines: number;
+      totalCaptured: number;
+    }
+  >;
+  isTelnetConnected?: () => boolean;
+  /**
+   * Programmatically open the Telnet console connection, exactly as if the
+   * user clicked the Connect button. Idempotent: no-op when already connected.
+   * Callers (e.g. the Action Script executor) use this instead of synthesizing
+   * a `.telnet-connect-btn` click, which would silently fail if the markup
+   * changed.
+   */
+  connectTelnet?: (options?: { skipRelayBuffer?: boolean }) => Promise<void>;
+  /**
+   * Programmatically close the Telnet console connection, mirroring the
+   * Disconnect button. Idempotent: no-op when already disconnected. Used by
+   * the MCP `telnet_disconnect` tool so an agent can release the 8085 socket
+   * without having to synthesize a UI click.
+   */
+  disconnectTelnet?: () => Promise<void>;
+};
+
+/**
+ * Telnet debug console (8085): connect, scrollback, find/filter, URL + JSON/XML viewers.
+ */
+export function setupTelnet(
+  panel: TelnetPanelElement,
+  device: TelnetConsoleDevice,
+  api: TelnetConsoleApi,
+  { devLog }: { devLog: (...args: unknown[]) => void }
+): void {
+  devLog('Setting up Telnet Console for:', api.ip, api.isRemote ? '(via relay)' : '(direct)');
+  
+  // Elements. Each lookup is typed to its concrete `HTMLBlahElement` so
+  // downstream `.disabled` / `.checked` / `.scrollTop` access is correctly
+  // typed without per-call casting. Then we re-bind to non-nullable aliases
+  // under the bare names — TypeScript's null-narrowing from the if-guard
+  // below only flows through linear control flow, nested callbacks (event
+  // handlers, IPC subscriptions, scroll-tail RAF) re-widen back to
+  // `T | null`, so per-callsite `!` assertions would otherwise be needed.
+  const maybeConnectBtn = panel.querySelector<HTMLButtonElement>('.telnet-connect-btn');
+  const maybeDisconnectBtn = panel.querySelector<HTMLButtonElement>('.telnet-disconnect-btn');
+  const maybeStatusEl = panel.querySelector<HTMLElement>('.telnet-status');
+  const maybeStatusText = panel.querySelector<HTMLElement>('.telnet-status-text');
+  const maybeOutputEl = panel.querySelector<HTMLElement>('.telnet-output');
+  const copyBtn = panel.querySelector<HTMLButtonElement>('.telnet-copy-btn');
+  const saveBtn = panel.querySelector<HTMLButtonElement>('.telnet-save-btn');
+  const scrollToBottomBtn = panel.querySelector<HTMLButtonElement>('.telnet-scroll-to-bottom');
+  const maybeClearBtn = panel.querySelector<HTMLButtonElement>('.telnet-clear-btn');
+  // Live counter shown left of the connection status pill while connected.
+  // Optional element — not in the early null-guard because absence just
+  // means the host markup didn't include it (silent no-op).
+  const lineCountEl = panel.querySelector<HTMLElement>('.telnet-line-count');
+  // Find/Filter has nothing to act on with an empty console, so hide the bar until logs
+  // exist. We hide the inner `.telnet-find-bar`, not the `.telnet-find-slot` wrapper — the
+  // slot stays as a flex spacer so Port/Connect remain right-aligned. Optional element.
+  //
+  // The bar markup is built from the shared `buildConsoleFindBarElement` (single source shared with
+  // the Log Viewer window) and injected into the template's `.telnet-find-slot` — ahead of the
+  // `.telnet-find-resize` drag handle — before any `.telnet-find-*` query runs below.
+  const findSlot = panel.querySelector<HTMLElement>('.telnet-find-slot');
+  if (findSlot && !findSlot.querySelector('.telnet-find-bar')) {
+    const bar = buildConsoleFindBarElement({ altShortcutHints: true });
+    bar.hidden = true; // shown by refreshLineCount once there are lines/spillover to search
+    findSlot.insertBefore(bar, findSlot.querySelector('.telnet-find-resize'));
+  }
+  const findBarEl = panel.querySelector<HTMLElement>('.telnet-find-bar');
+  // Console analytics dashboard button (optional element). Enabled by refreshLineCount once there are
+  // in-memory log lines to analyze; opens the shared console-analytics-modal on click.
+  const dashboardBtn = panel.querySelector<HTMLButtonElement>('[data-telnet-dashboard]');
+
+  // Downstream handlers reference statusEl, statusText, disconnectBtn, and clearBtn
+  // without null checks. Assert them here so a reused fragment without these nodes
+  // fails fast with a clear message instead of NPE'ing much later.
+  if (
+    !maybeConnectBtn ||
+    !maybeOutputEl ||
+    !maybeDisconnectBtn ||
+    !maybeStatusEl ||
+    !maybeStatusText ||
+    !maybeClearBtn
+  ) {
+    rendererError('Telnet console elements not found');
+    return;
+  }
+
+  // Non-null aliases under the bare names so all downstream code reads
+  // identically to the pre-typecheck era.
+  const connectBtn = maybeConnectBtn;
+  const disconnectBtn = maybeDisconnectBtn;
+  const statusEl = maybeStatusEl;
+  const statusText = maybeStatusText;
+  const outputEl = maybeOutputEl;
+  const clearBtn = maybeClearBtn;
+  const connectSplit = panel.querySelector<HTMLElement>('.telnet-connect-split');
+  const isRelayConsole = !!(api.isRemote && api.serverUrl && api.telnetClearRelayBuffer);
+  let closeOpenTelnetSplitMenu: (() => void) | null = null;
+
+  // State
+  type TelnetLogEntry = {
+    text: string;
+    timestamp: string | null;
+    type: string;
+    structuredTargets?: StructuredConsolePayload[];
+    /** Whether this line is a recognized BrightScript issue (see brightscript-error-catalog).
+     *  Computed once at construction; drives the Console Monitor button's enabled state. */
+    hasIssue?: boolean;
+  };
+  let isConnected = false;
+  let logLines: TelnetLogEntry[] = [];
+
+  // Running count of recognized BrightScript issues in the in-memory buffer. The Console Monitor is a
+  // BrightScript-issue view (not an app-log view), so its button is enabled ONLY when this is > 0.
+  // Maintained incrementally at every logLines mutation so we never rescan the whole buffer on a batch.
+  let recognizedIssueCount = 0;
+  /** Recognized-issue test (shared with the monitor modal via the catalog's bounded recognizer). */
+  const lineHasBrsIssue = (text: string): boolean => recognizeBrsIssue(text) !== null;
+  const countIssues = (entries: TelnetLogEntry[]): number =>
+    entries.reduce((n, e) => n + (e.hasIssue ? 1 : 0), 0);
+
+  /**
+   * Disk-backed scrollback spill (see `main/console-spill.ts`).
+   *
+   * - `spillId`: per-Connect handle from main; `null` between sessions and
+   *   while the start IPC is in flight.
+   * - `spilledEntryCount`: total entries written to disk this session. Used
+   *   for the "N of M lines" counter and to decide whether the auto-load on
+   *   scroll-up has anything to show.
+   * - `spillCapHit`: latched true when main reports it dropped entries
+   *   (file size cap). Past this point we stop trying to append — the disk
+   *   file is full so the entries are lost regardless. Avoids per-batch IPC
+   *   noise when streaming a forgotten session.
+   */
+  let spillId: string | null = null;
+  let spilledEntryCount = 0;
+  let spillCapHit = false;
+
+  // Mount the shared console-log surface — find bar + virtualizer + viewer
+  // shortcuts + filter-on-mount + JSON+/find-highlight bind/unbind, all in
+  // one call. The Log Viewer mounts the same surface on a static entry array;
+  // the panel mounts it on a streaming one and tells the surface about
+  // appends and trims via `notifyAppended` / `notifyTrimmed`.
+  //
+  // `preservePlaceholder: true` skips the surface's outputEl clear so the
+  // "Connect to Roku…" placeholder element survives until the first batch
+  // arrives (the panel's `updateConnectionState` removes it then).
+  //
+  // `buildLineEl: createLogLineElement` overrides the surface's default row
+  // builder. The panel's builder defers URL detection on heavy (>=6 KB)
+  // streaming lines via `enqueueDeferredTelnetHeavyLine` so the per-flush
+  // DOM cost stays bounded — the default builder's sync detection would
+  // pile up under 350-line bursts.
+  //
+  // `onSelectAll` (Cmd/Ctrl+A) lays a native selection Range over the
+  // virtualizer's content element — it selects (so the user can Cmd+C), it
+  // does not auto-copy. Only mounted rows are natively selectable.
+  const surface = mountConsoleLogSurface({
+    outputEl,
+    entries: logLines,
+    findBarHost: panel,
+    shortcutScopeEl: panel,
+    historyScope: api.ip || 'unknown',
+    preservePlaceholder: true,
+    buildLineEl: (entry, index) => createLogLineElement(entry as TelnetLogEntry, index),
+    // Find navigation must unpin stick-to-bottom before scrolling to the match.
+    // Otherwise a streaming batch's `followTailScroll()` keeps snapping the view
+    // back to the newest line while the find bar pulls it to the hit — the two
+    // scroll controllers fight every frame and the console visibly flickers.
+    // Setting `pinnedToBottom = false` here also cancels any in-flight
+    // `followTailScroll` (its `scrollOnce` guard bails on `!pinnedToBottom`).
+    scrollLineIntoView: (idx) => {
+      if (pinnedToBottom) {
+        pinnedToBottom = false;
+        updateScrollToBottomAffordance();
+      }
+      virt.scrollToIndex(idx, { align: 'center' });
+    },
+    // Filter mode: the find bar scans the resident buffer itself (no
+    // `remoteSearch` backend — everything's already in memory) and reports
+    // matching raw line indices here. Routing straight to the virtualizer's
+    // size-cache pin (`applyRowFilter`) instead of the CSS `filtered-out`
+    // class keeps a sparse filter (e.g. 35 matches in 23,000 lines) from
+    // forcing a mount-and-measure walk over the whole buffer to fill one
+    // viewport — see `console-virtualizer.ts` for why that cascade happened.
+    onFilterLinesChange: (matchLines) => virt.applyRowFilter(matchLines),
+    onSelectAll: () => {
+      // Cmd+A selects (it does NOT copy) — leaving the actual Cmd+C to the
+      // user, like a normal text region. We scope the native selection to the
+      // console output container (rather than letting the browser select the
+      // whole page) by laying a Range over the virtualizer's content element.
+      // Note: only the virtualized rows currently mounted in the DOM can be
+      // highlighted; off-screen scrollback isn't selectable natively.
+      const sel = window.getSelection();
+      if (!sel) return;
+      const container = surface.view.getContainerEl();
+      const range = document.createRange();
+      range.selectNodeContents(container);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  });
+  // Aliases so the rest of this file (which predates the surface refactor)
+  // keeps reading the same. `virt.scrollToIndex` / `virt.getTotalSize` etc.
+  // are forwarded from the underlying virtualizer.
+  const virt = surface.view;
+  const findBarHandle = surface.findBar;
+  // Per-connection parser state. The pending `[DEBUG]`-on-its-own-line prefix
+  // can carry across IPC chunks, so the state lives at panel scope (one per
+  // device) — calls to `parseConsoleLineBatch` thread it through. Used as the
+  // *disconnected* fallback below; while connected, the equivalent state lives
+  // inside `telnetParseWorker` instead (see `getParsedTelnetEntries`).
+  const telnetParserState = createConsoleLineParserState();
+  const telnetTcpState: TelnetLineBufferState = { value: '' };
+  /** One dedicated worker per connection (not a shared pool task — the parser state it holds must
+   *  see this connection's chunks in order). Spun up in `connectTelnet`, torn down on disconnect. */
+  let telnetParseWorker: WorkerPool<string[], TelnetParseResult> | null = null;
+
+  /** Route through the per-connection worker when one exists (i.e. while connected); otherwise fall
+   *  back to the synchronous parse using the disconnected-fallback state above. The two states are
+   *  never both live for the same stretch of input — the worker is created/destroyed exactly around
+   *  the connected lifetime — so there's no continuation split between them. Either way,
+   *  `telnetParserState.pendingLogPrefix` ends up mirroring whichever state actually ran (the
+   *  fallback call mutates it directly; the worker reports its own copy back), so the existing
+   *  disconnect-time "flush a dangling prefix" check keeps working unchanged either way. */
+  async function getParsedTelnetEntries(lines: string[]): Promise<ParsedTelnetEntry[]> {
+    if (!telnetParseWorker) return parseConsoleLineBatch(telnetParserState, lines);
+    const result = await telnetParseWorker.run(lines);
+    telnetParserState.pendingLogPrefix = result.pendingLogPrefix;
+    return result.entries;
+  }
+  /** Complete lines waiting for one DOM flush (coalesces bursty IPC / main-process batches). */
+  let pendingTelnetLines: string[] = [];
+  /** Paced flush: limits work per frame + spacing so JSON/XML/URL modals and scrolling stay responsive while streaming. */
+  let telnetFlushHandle = 0;
+  let telnetFlushKind: 'raf' | 'timeout' | null = null;
+  let lastTelnetFlushMs = 0;
+  const TELNET_STREAM_MAX_LINES_PER_FLUSH = 350;
+  const TELNET_STREAM_MIN_FLUSH_INTERVAL_MS = 36;
+  // Heavy-line and per-line truncation caps live in `console-render-limits.ts`
+  // (DEFER_HEAVY_LINE_CHARS / MAX_LOG_LINE_CHARS) so the Log Viewer reads
+  // identical thresholds.
+  // Heavy-line deferred drain (URL detect + structured detect, paused while a
+  // content modal is open). Owns its own queue + timer; the panel only sees
+  // `enqueue` / `clear` / `schedule`. See `console-deferred-heavy-drain.ts`.
+  const deferredHeavyDrain = createConsoleDeferredHeavyDrain({
+    isModalOpen: () => isTelnetContentModalOpen(),
+    isSelectionActive: () => userSelecting
+  });
+
+  /**
+   * Cap scrollback in memory. Live-only; the Log Viewer is bounded by the
+   * file-size cap upstream.
+   *
+   * Sized for a long debug session (≈ a few hours of moderate streaming)
+   * without making the renderer feel sluggish:
+   *
+   *   - Memory: ~300 bytes/entry on average × 50,000 ≈ 15 MB. Comfortable
+   *     even on the modest hardware some QA labs use.
+   *   - Layout: virtualization caps mounted DOM rows at ~40 regardless of
+   *     model size, so paint cost is constant in the cap. The bottleneck
+   *     is initial-mount math when scrolling to the very top of a large
+   *     backlog (`getVirtualItems` resize), and 50K is comfortably below
+   *     where that becomes noticeable on Apple-silicon and modern x86.
+   *
+   * Earlier value was 10,000 (set pre-virtualization, when each line was a
+   * real DOM node and 10K rows already pushed the layout budget). With
+   * virtualization that ceiling is no longer the binding constraint, so
+   * this is a 5× headroom bump for users with long telnet sessions.
+   *
+   * Older lines past the cap are **not** lost: `ensureTelnetScrollbackRoom`
+   * spills the trimmed segment to an NDJSON file in OS temp (see
+   * `main/console-spill.ts`), and `maybeAutoLoadSpill` / `loadAllEntriesIncludingSpill`
+   * prepend that history back into the visible model on scroll-to-top and
+   * on Copy/Save/Cmd+A respectively. The live counter renders
+   * `<buffered> of <total> lines` while a spill is active. Hard ceiling at
+   * 100 MB per session — past that, `spillCapHit` latches and the surface
+   * degrades to the classic "scrollback" model (Chrome DevTools, iTerm,
+   * VSCode integrated terminal) for any further trims.
+   */
+  const TELNET_MAX_SCROLLBACK_LINES = 50000;
+  const SCROLL_TAIL_THRESHOLD_PX = 100;
+  let isScrolling = false;
+  /** When true, new log lines keep the view pinned to the tail. */
+  let pinnedToBottom = true;
+  let lastScrollTop = 0;
+  let tailFollowToken = 0;
+  /** True while a tail-follow RAF chain is pending — lets streaming flushes
+   *  coalesce onto the in-flight chain instead of stacking a new 3-pass run. */
+  let tailFollowScheduled = false;
+  /** True while the user has a live (non-collapsed) text selection inside the
+   *  console output, OR is mid-drag having pressed the mouse down inside it.
+   *  Auto-scroll-to-tail, scrollback trim, unmounting, and the heavy-line
+   *  drain are all paused while this holds so the selection's DOM nodes
+   *  aren't scrolled/recycled/removed/rewritten mid-drag — that was
+   *  collapsing the selection and snapping the view to the top or bottom.
+   *  Everything resumes once the selection is cleared. */
+  let userSelecting = false;
+  /** True from a left-button mousedown inside the console output until the
+   *  next mouseup anywhere. `selectionActiveInOutput()` alone is too fragile
+   *  a signal *during* a drag: the browser's own auto-scroll-while-dragging
+   *  (triggered by holding the mouse near the viewport's bottom edge — the
+   *  exact gesture a long drag-select uses) can transiently compute the
+   *  live selection's `commonAncestorContainer` as sitting outside
+   *  `outputEl` for a frame, which would flip `userSelecting` back to
+   *  `false` mid-drag and immediately resume unmounting/the drain — undoing
+   *  the fix the instant it's needed most. The mouse-button state can't
+   *  flicker like that: it's down for the whole gesture, full stop. */
+  let mouseDownInOutput = false;
+
+  /** Is there a non-collapsed selection whose range lives inside the console
+   *  output? Cheap enough to call on every `selectionchange`. */
+  function selectionActiveInOutput(): boolean {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+    return outputEl.contains(sel.getRangeAt(0).commonAncestorContainer);
+  }
+
+  function updateUserSelecting(): void {
+    const active = mouseDownInOutput || selectionActiveInOutput();
+    if (active === userSelecting) return;
+    userSelecting = active;
+    // A long drag-select that scrolls (manually, or the browser's own edge auto-scroll while
+    // dragging near the viewport bottom) would otherwise unmount earlier-selected rows as they
+    // fall out of the virtualizer's overscan buffer, collapsing/truncating the selection — its
+    // Range holds actual DOM nodes, not logical line indices. Suspend unmounting for the
+    // duration of the selection; resuming immediately unmounts everything outside the current
+    // window in one pass, so this doesn't leave stray rows mounted indefinitely.
+    virt.setUnmountSuspended(active);
+    // Selection just cleared: catch back up to the tail (and let the deferred
+    // scrollback trim run) if we were pinned to the bottom.
+    if (!active) {
+      // Heavy-line drain paused itself (`isSelectionActive`) rather than rescheduling — nudge it
+      // awake now, same as the modal-close resume path.
+      scheduleDeferredTelnetDrain();
+      if (pinnedToBottom) {
+        ensureTelnetScrollbackRoom(0);
+        followTailScroll();
+      }
+    }
+  }
+
+  const onSelectionChange = (): void => updateUserSelecting();
+
+  const onOutputMouseDown = (e: MouseEvent): void => {
+    if (e.button !== 0) return;
+    mouseDownInOutput = true;
+    updateUserSelecting();
+  };
+  const onWindowMouseUp = (): void => {
+    if (!mouseDownInOutput) return;
+    mouseDownInOutput = false;
+    updateUserSelecting();
+  };
+
+  function distanceFromBottom(): number {
+    return outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight;
+  }
+
+  function isNearBottom(): boolean {
+    return distanceFromBottom() <= SCROLL_TAIL_THRESHOLD_PX;
+  }
+
+  function updateScrollToBottomAffordance(): void {
+    if (!scrollToBottomBtn) return;
+    scrollToBottomBtn.hidden = logLines.length === 0 || pinnedToBottom;
+  }
+
+  /** Scroll the virtualizer to the log tail. Multi-pass so measured row heights settle. */
+  function followTailScroll(onDone?: () => void): void {
+    // Each pass reads the *current* tail (`logLines.length - 1`) at execution
+    // time, so when a chain is already pending for the streaming path it will
+    // land on the newest line anyway — skip stacking another. Only callers that
+    // need the `onDone` callback (programmatic jump-to-bottom) force a fresh run.
+    if (tailFollowScheduled && !onDone) return;
+    const token = ++tailFollowToken;
+    tailFollowScheduled = true;
+    isScrolling = true;
+    const scrollOnce = (): void => {
+      if (token !== tailFollowToken || !pinnedToBottom) return;
+      if (logLines.length > 0) {
+        virt.scrollToIndex(logLines.length - 1, { align: 'end' });
+        lastScrollTop = outputEl.scrollTop;
+      }
+    };
+    const finish = (): void => {
+      if (token !== tailFollowToken) return;
+      tailFollowScheduled = false;
+      lastScrollTop = outputEl.scrollTop;
+      isScrolling = false;
+      onDone?.();
+    };
+    requestAnimationFrame(() => {
+      if (token !== tailFollowToken) return;
+      scrollOnce();
+      requestAnimationFrame(() => {
+        if (token !== tailFollowToken) return;
+        scrollOnce();
+        queueMicrotask(() => {
+          scrollOnce();
+          finish();
+        });
+      });
+    });
+  }
+
+  function scrollToLatestLogs(): void {
+    if (logLines.length === 0) return;
+    pinnedToBottom = true;
+    followTailScroll(() => {
+      updateScrollToBottomAffordance();
+    });
+  }
+
+  function isTelnetContentModalOpen(): boolean {
+    const s = document.getElementById('telnetStructuredViewerOverlay');
+    const u = document.getElementById('telnetUrlViewerOverlay');
+    return (
+      (s instanceof HTMLElement && s.classList.contains('active')) ||
+      (u instanceof HTMLElement && u.classList.contains('active'))
+    );
+  }
+
+  // Thin aliases so the rest of this file reads the same after the extract.
+  // The actual queue + slicing + modal-pause logic lives in
+  // `console-deferred-heavy-drain.ts` (see `deferredHeavyDrain` above).
+  const clearDeferredTelnetHeavyLines = () => deferredHeavyDrain.clear();
+  const scheduleDeferredTelnetDrain = () => deferredHeavyDrain.schedule();
+  const enqueueDeferredTelnetHeavyLine = (job: {
+    entry: TelnetLogEntry;
+    lineEl: HTMLElement;
+    contentEl: HTMLElement;
+  }) => deferredHeavyDrain.enqueue(job);
+
+
+  /**
+   * Refresh the live line counter shown left of the connection status pill.
+   * Hidden when not connected (avoids cluttering the disconnected state and
+   * also lets the counter "reset" visually when the user disconnects).
+   *
+   * Counter form depends on whether the disk spill has any content:
+   *   - No spill:     `12,453 lines`            — fits in memory, equals total.
+   *   - Spill active: `12,453 of 67,892 lines`  — buffer + on-disk total.
+   *
+   * The "of M" form makes the disk-spill mechanism discoverable without an
+   * extra UI element. The numbers stay tabular (`font-variant-numeric:
+   * tabular-nums`) so they don't jitter on every batch.
+   */
+  function refreshLineCount(): void {
+    // Show the Find/Filter bar only once there's something to search (in-memory or spilled).
+    // Keyed on log presence, not connection, so logs that persist after disconnect stay searchable.
+    if (findBarEl) findBarEl.hidden = logLines.length === 0 && spilledEntryCount === 0;
+
+    // The Console Monitor is a BrightScript-issue view, so its button is enabled ONLY when the buffer
+    // holds at least one recognized issue (error or warning) — never merely because there are lines.
+    // Independent of connection: recognized issues stay inspectable after disconnect.
+    if (dashboardBtn) dashboardBtn.disabled = recognizedIssueCount === 0;
+    // If the monitor is open, live-update it as new issues stream in (debounced inside).
+    scheduleAnalyticsRefresh();
+
+    if (!lineCountEl) return;
+    if (!isConnected) {
+      lineCountEl.hidden = true;
+      lineCountEl.textContent = '';
+      return;
+    }
+    const buffered = logLines.length;
+    const total = spilledEntryCount + buffered;
+    lineCountEl.hidden = false;
+    // Compact label (e.g. "50K / 132K") so a large count can't crowd the header
+    // and force the centered search box to overlap it; the full text is in the
+    // tooltip.
+    const compact = (n: number): string =>
+      n >= 1_000_000
+        ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+        : n >= 10_000
+          ? `${Math.round(n / 1000)}K`
+          : n.toLocaleString();
+    if (spilledEntryCount > 0) {
+      lineCountEl.textContent = `${compact(buffered)} / ${compact(total)}`;
+      lineCountEl.title = S.telnet.spillTooltip(
+        buffered.toLocaleString(),
+        total.toLocaleString(),
+        spilledEntryCount.toLocaleString(),
+        spillCapHit
+      );
+    } else {
+      lineCountEl.textContent = S.telnet.linesCount(compact(buffered), buffered);
+      if (buffered >= 10_000) lineCountEl.title = S.telnet.linesCount(buffered.toLocaleString(), buffered);
+      else lineCountEl.removeAttribute('title');
+    }
+  }
+
+
+  /** Relay split menus use fixed coords; portal to body so inner-tab transforms don't offset them. */
+  function wireTelnetSplitMenu(
+    splitControl: HTMLElement,
+    menuBtn: HTMLButtonElement,
+    menu: HTMLElement,
+    registerCleanup: (fn: () => void) => void
+  ): { close: () => void } {
+    menuBtn.hidden = false;
+
+    function portalMenu(): void {
+      if (menu.parentElement !== document.body) {
+        document.body.appendChild(menu);
+      }
+    }
+
+    function restoreMenu(): void {
+      if (menu.parentElement === document.body && splitControl.isConnected) {
+        splitControl.appendChild(menu);
+      }
+    }
+
+    function positionMenu(): void {
+      portalMenu();
+      const rect = menuBtn.getBoundingClientRect();
+      const splitMain = splitControl.querySelector<HTMLElement>('.telnet-split-main');
+      const anchorWidth = splitMain
+        ? splitMain.getBoundingClientRect().width + rect.width
+        : rect.width;
+      menu.style.position = 'fixed';
+      menu.style.top = `${Math.round(rect.bottom + 4)}px`;
+      menu.style.left = 'auto';
+      menu.style.right = `${Math.round(window.innerWidth - rect.right)}px`;
+      menu.style.bottom = 'auto';
+      menu.style.minWidth = `${Math.max(Math.round(anchorWidth), 240)}px`;
+    }
+
+    function setOpen(open: boolean): void {
+      if (open) {
+        closeOpenTelnetSplitMenu?.();
+        closeOpenTelnetSplitMenu = closeMenu;
+        positionMenu();
+        menu.hidden = false;
+        menuBtn.setAttribute('aria-expanded', 'true');
+      } else {
+        if (closeOpenTelnetSplitMenu === closeMenu) {
+          closeOpenTelnetSplitMenu = null;
+        }
+        menu.hidden = true;
+        menuBtn.setAttribute('aria-expanded', 'false');
+        restoreMenu();
+      }
+    }
+
+    function closeMenu(): void {
+      setOpen(false);
+    }
+
+    menuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setOpen(menu.hidden);
+    });
+
+    const onDocumentClick = (e: MouseEvent) => {
+      if (menu.hidden) return;
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      if (menu.contains(t) || menuBtn.contains(t)) return;
+      closeMenu();
+    };
+
+    const onDocumentKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !menu.hidden) {
+        closeMenu();
+      }
+    };
+
+    const onReposition = () => {
+      if (!menu.hidden) positionMenu();
+    };
+
+    document.addEventListener('click', onDocumentClick);
+    document.addEventListener('keydown', onDocumentKeydown);
+    window.addEventListener('resize', onReposition);
+    window.addEventListener('scroll', onReposition, true);
+    registerCleanup(() => {
+      closeMenu();
+      if (closeOpenTelnetSplitMenu === closeMenu) {
+        closeOpenTelnetSplitMenu = null;
+      }
+      document.removeEventListener('click', onDocumentClick);
+      document.removeEventListener('keydown', onDocumentKeydown);
+      window.removeEventListener('resize', onReposition);
+      window.removeEventListener('scroll', onReposition, true);
+    });
+
+    return { close: closeMenu };
+  }
+
+  // Update UI based on connection state
+  function updateConnectionState(connected: boolean, connecting = false, error: string | null = null) {
+    isConnected = connected;
+
+    if (connecting) {
+      statusEl.className = 'telnet-status connecting';
+      statusText.textContent = S.telnet.statusConnecting;
+      connectBtn.disabled = true;
+      if (isRelayConsole && connectSplit) {
+        connectSplit.hidden = true;
+      }
+      closeOpenTelnetSplitMenu?.();
+    } else if (connected) {
+      statusEl.className = 'telnet-status connected';
+      statusText.textContent = S.common.connected;
+      connectBtn.style.display = 'none';
+      disconnectBtn.style.display = '';
+      if (isRelayConsole && connectSplit) {
+        connectSplit.hidden = true;
+      }
+      closeOpenTelnetSplitMenu?.();
+
+      // Clear placeholder
+      const placeholder = outputEl.querySelector('.telnet-placeholder');
+      if (placeholder) placeholder.remove();
+    } else {
+      statusEl.className = error ? 'telnet-status error' : 'telnet-status disconnected';
+      statusText.textContent = error ? S.telnet.errorStatusPrefix(error) : S.common.disconnected;
+      connectBtn.style.display = '';
+      connectBtn.disabled = false;
+      disconnectBtn.style.display = 'none';
+      if (isRelayConsole && connectSplit) {
+        connectSplit.hidden = false;
+      }
+    }
+
+    refreshLineCount();
+  }
+  
+  // The row DOM is built by the shared `buildConsoleLogLineElement` — the same builder the Log Viewer
+  // uses. The Console's only specialization is deferring heavy-line URL/structured detection off the
+  // streaming hot path (via the deferred-heavy-line drain), passed as `onDeferHeavy`. JSON+ inline-tint
+  // binding happens in the virtualizer's `onMount` callback, not here, so we don't double-paint.
+  function createLogLineElement(logEntry: TelnetLogEntry, index: number): HTMLElement {
+    return buildConsoleLogLineElement(logEntry, index, {
+      shouldFilterOut: (entry) => findBarHandle?.shouldFilterOut(entry.text) ?? false,
+      onDeferHeavy: (job) => enqueueDeferredTelnetHeavyLine(job)
+    });
+  }
+  
+  /**
+   * Spill a batch of trimmed entries to disk. Fire-and-forget — the IPC
+   * round-trip is fast (single appendFileSync on the main side) and its
+   * result is consumed only for the in-memory `spilledEntryCount` counter
+   * and `spillCapHit` latch. Errors are logged and otherwise swallowed:
+   * the in-memory trim happened regardless, so a spill failure just means
+   * the counter understates "total received" — not a fatal condition.
+   */
+  function appendToSpill(trimmed: TelnetLogEntry[]): void {
+    if (!spillId || spillCapHit || trimmed.length === 0) return;
+    // Compact field names (`t`, `ty`, `st`) to save bytes on disk; the
+    // read path on this same renderer reverses the mapping.
+    const payload = trimmed.map((e) => ({
+      t: e.text,
+      ty: e.type,
+      ...(e.structuredTargets ? { st: e.structuredTargets } : {})
+    }));
+    void window.roku.consoleSpillAppend(spillId, payload).then(
+      (res: { success: boolean; entryCount?: number; dropped?: number; error?: string }) => {
+        if (!res?.success) {
+          rendererWarn('[Console spill] append failed:', res?.error);
+          return;
+        }
+        if (typeof res.entryCount === 'number') spilledEntryCount = res.entryCount;
+        if (typeof res.dropped === 'number' && res.dropped > 0) {
+          spillCapHit = true;
+        }
+        refreshLineCount();
+      },
+      (err: unknown) => {
+        rendererWarn('[Console spill] append rejected:', err);
+      }
+    );
+  }
+
+  /** Drop oldest lines from memory + DOM when over cap; preserve scroll offset. */
+  function ensureTelnetScrollbackRoom(linesToAdd: number) {
+    // Trimming removes head rows and rewrites scrollTop, which collapses an
+    // in-progress text selection and snaps the view. Defer while the user has a
+    // live selection in the console — `onSelectionChange` runs a catch-up trim
+    // once the selection clears, and the next batch trims any accumulated tail.
+    if (userSelecting) return;
+    let overflow = logLines.length + linesToAdd - TELNET_MAX_SCROLLBACK_LINES;
+    if (overflow <= 0) return;
+
+    // Capture before shift so we can spill the exact entries about to leave
+    // memory. `splice(0, n)` returns the removed segment in one call and is
+    // measurably faster than n × `shift()` on large arrays.
+    const trimmed = logLines.splice(0, overflow);
+    recognizedIssueCount -= countIssues(trimmed);
+
+    const toRemove = overflow;
+    if (toRemove > 0) {
+      const beforeST = outputEl.scrollTop;
+      // The surface routes through `view.shiftIndicesAfterTrim(toRemove)` +
+      // `view.setCount(logLines.length)` + `findBar.onLinesRemoved(toRemove)`
+      // and returns the exact pixel delta the trim removed (computed from
+      // the virtualizer's measured sizes before/after — the right number
+      // for wrapped multi-row entries, where `toRemove * estimateSize` is
+      // wrong by a wide margin).
+      const removedPx = surface.notifyTrimmed(toRemove);
+      outputEl.scrollTop = Math.max(0, beforeST - removedPx);
+      appendToSpill(trimmed);
+      refreshLineCount();
+    }
+  }
+
+  function cancelTelnetFlush() {
+    if (telnetFlushKind === 'raf') {
+      cancelAnimationFrame(telnetFlushHandle);
+    } else if (telnetFlushKind === 'timeout') {
+      clearTimeout(telnetFlushHandle);
+    }
+    telnetFlushHandle = 0;
+    telnetFlushKind = null;
+  }
+
+  function scheduleTelnetRender() {
+    if (telnetFlushKind !== null) return;
+
+    function pump() {
+      telnetFlushHandle = 0;
+      telnetFlushKind = null;
+
+      if (isTelnetContentModalOpen()) {
+        telnetFlushKind = 'timeout';
+        telnetFlushHandle = window.setTimeout(() => {
+          telnetFlushHandle = 0;
+          telnetFlushKind = null;
+          scheduleTelnetRender();
+        }, 64);
+        return;
+      }
+
+      const backlog = pendingTelnetLines.length;
+      if (backlog === 0) return;
+
+      const now = performance.now();
+      const elapsed = now - lastTelnetFlushMs;
+      if (
+        elapsed < TELNET_STREAM_MIN_FLUSH_INTERVAL_MS &&
+        backlog < TELNET_STREAM_MAX_LINES_PER_FLUSH * 4
+      ) {
+        telnetFlushKind = 'timeout';
+        telnetFlushHandle = window.setTimeout(() => {
+          telnetFlushHandle = 0;
+          telnetFlushKind = null;
+          scheduleTelnetRender();
+        }, Math.max(8, TELNET_STREAM_MIN_FLUSH_INTERVAL_MS - elapsed));
+        return;
+      }
+
+      lastTelnetFlushMs = performance.now();
+      const take = Math.min(backlog, TELNET_STREAM_MAX_LINES_PER_FLUSH);
+      const batch = pendingTelnetLines.splice(0, take);
+      if (batch.length) {
+        addLogLinesBatch(batch, true, false);
+      }
+
+      if (pendingTelnetLines.length > 0) {
+        telnetFlushKind = 'raf';
+        telnetFlushHandle = requestAnimationFrame(pump);
+      }
+    }
+
+    telnetFlushKind = 'raf';
+    telnetFlushHandle = requestAnimationFrame(pump);
+  }
+
+  /** Flush queued TCP lines now instead of waiting for the next paced render (disconnect /
+   *  user-facing "give me everything captured so far" reads). No longer literally synchronous —
+   *  each batch goes through `getParsedTelnetEntries` like any other, off-thread while connected —
+   *  but callers can still rely on every queued line having landed in `logLines` once this resolves. */
+  async function flushTelnetPendingLines() {
+    cancelTelnetFlush();
+    while (pendingTelnetLines.length > 0) {
+      const take = Math.min(pendingTelnetLines.length, TELNET_STREAM_MAX_LINES_PER_FLUSH * 12);
+      const batch = pendingTelnetLines.splice(0, take);
+      if (batch.length) {
+        await addLogLinesBatch(batch, true, false);
+      }
+    }
+  }
+
+  function onTelnetViewerClosedResume() {
+    cancelTelnetFlush();
+    scheduleTelnetRender();
+    scheduleDeferredTelnetDrain();
+  }
+  document.addEventListener(CONSOLE_VIEWER_CLOSED_EVENT, onTelnetViewerClosedResume);
+
+  function ingestTelnetIpcChunk(chunk: string) {
+    // The main-process 8085 socket can stay open after this panel disconnects
+    // when another holder (e.g. a Fiddle window) still leases it. In that case
+    // `TelnetData` keeps broadcasting to every renderer; ignore it here once
+    // this panel is no longer connected so the UI state and the log stream
+    // don't diverge (and `getTelnetLogSnapshot().connected` stays truthful).
+    if (!isConnected) return;
+    const lines = appendTelnetChunk(telnetTcpState, chunk);
+    if (lines.length === 0) return;
+    let sawCue = false;
+    let sawClaim = false;
+    let sawAttached = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      pendingTelnetLines.push(line);
+      if (DEBUGGER_WAITING_RE.test(line)) sawCue = true;
+      else if (DEBUGGER_CLAIMED_RE.test(line)) {
+        sawClaim = true;
+        if (DEBUGGER_ATTACHED_RE.test(line)) sawAttached = true;
+      }
+    }
+    scheduleTelnetRender();
+    // Roku flushes recent history to a fresh 8085 client. A burst landing right after OUR connect
+    // that holds the "waiting" cue AND how it ended (a debugger connected / nobody did) is that
+    // replay — the port for that launch is long gone, so don't dial it. Outside that window a cue is
+    // live: a debug channel is waiting (~10 s) for a socket debugger on 8081 — attach.
+    // Transport-agnostic on purpose: local, lab-server and RCE consoles all land here.
+    const replayBurst = performance.now() - connectedAt < CONSOLE_REPLAY_WINDOW_MS;
+    if (sawCue && !(replayBurst && sawClaim)) debugSidebar.onDeviceWaitingForDebugger();
+    // Replayed "remote debugger connected" with no live session here: a debugger owned this channel
+    // run and left, and Roku keeps routing its print output there — say so instead of going quiet.
+    if (replayBurst && sawAttached && !debugSidebar.isAttached()) noteDebuggerOwnsOutput();
+  }
+
+  /** Add many complete log lines in one layout pass (stable under flood). */
+  async function addLogLinesBatch(rawLineChunks: string[], timestamp = true, splitEntries = true) {
+    // Collapse incoming raw chunks into a flat per-line list. `splitEntries`
+    // is the "this came as a multi-line blob, please split me" flag — set by
+    // synthetic injections like `--- Connected ---` that arrive whole. The
+    // streaming path passes `splitEntries=false` because `appendTelnetChunk`
+    // already returned discrete lines from the TCP buffer.
+    const linesToProcess: string[] = [];
+    if (splitEntries) {
+      for (const text of rawLineChunks) {
+        const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+        for (const line of lines) linesToProcess.push(line);
+      }
+    } else {
+      for (const line of rawLineChunks) linesToProcess.push(line);
+    }
+
+    // Shared parser (`console-line-parser.ts`) — same logic the file viewer uses. Off the main
+    // thread via `telnetParseWorker` while connected (see `getParsedTelnetEntries`); either way the
+    // continuation state ([DEBUG]-prefix line whose continuation arrives in the next batch) is
+    // threaded through correctly since only one of the two states is ever live at a time.
+    let parsed: ParsedTelnetEntry[];
+    try {
+      parsed = await getParsedTelnetEntries(linesToProcess);
+    } catch (err) {
+      // A rejected worker task must not silently drop this whole batch of real device output —
+      // fall back to a same-thread parse so the lines still render (possibly against the
+      // disconnected-fallback state rather than the worker's, a one-batch inconsistency that
+      // self-corrects on the next call; better than losing console output outright).
+      rendererError('[Telnet] parse failed, falling back to main-thread parse:', err);
+      parsed = parseConsoleLineBatch(telnetParserState, linesToProcess);
+    }
+    if (parsed.length === 0) return;
+
+    const newEntries: TelnetLogEntry[] = parsed.map((p) => ({
+      text: p.text,
+      // 24-hour format (`23:44:21`) — matches BrightScript's own `[DEBUG]
+      // 23:44:21.234` log prefix style and avoids the `AM/PM` suffix
+      // doubling the timestamp gutter width. `[]` lets the user's locale
+      // pick separators / numbering system; `hour12: false` overrides only
+      // the 12/24 toggle (en-US default would be 12).
+      timestamp: timestamp ? new Date().toLocaleTimeString([], { hour12: false }) : null,
+      type: p.type,
+      hasIssue: lineHasBrsIssue(p.text),
+      ...(p.structuredTargets ? { structuredTargets: p.structuredTargets } : {})
+    }));
+    recognizedIssueCount += countIssues(newEntries);
+
+    ensureTelnetScrollbackRoom(newEntries.length);
+
+    const placeholder = outputEl.querySelector('.telnet-placeholder');
+    if (placeholder) placeholder.remove();
+    outputEl.querySelector('.telnet-scroll-spacer')?.remove();
+
+    // Push entries into the model, then notify the surface so the
+    // virtualizer relayouts (it mounts only rows in the visible window —
+    // bursty stream of 350 lines per flush creates ~5 rows of bottom-edge
+    // mounts, or zero if the user has scrolled away from the tail) and the
+    // find bar incrementally scans the new tail (cheap no-op without an
+    // active query).
+    for (const logEntry of newEntries) {
+      logLines.push(logEntry);
+    }
+    surface.notifyAppended();
+    refreshLineCount();
+
+    // Don't yank the view to the tail while the user is selecting text — the
+    // scroll would recycle the virtualized rows out from under the selection.
+    // New lines still buffer; `onSelectionChange` catches up when it clears.
+    if (pinnedToBottom && !userSelecting) {
+      followTailScroll();
+    } else {
+      updateScrollToBottomAffordance();
+    }
+  }
+
+  function addLogLine(text: string, timestamp = true): Promise<void> {
+    return addLogLinesBatch([text], timestamp, true);
+  }
+
+  /**
+   * One-shot guard: prevents the spill auto-load from re-firing on every
+   * scroll event after it's already loaded once for this session. The
+   * counter ("12,453 of 67,892 lines") still tracks new spill writes after
+   * load, but the on-disk content is already merged into the view, so
+   * re-loading is wasted work.
+   *
+   * Reset on Clear / new Connect (both call `consoleSpillStart` again,
+   * which implies a fresh session — old loaded entries are dropped via
+   * in-place `logLines.length = 0` in the Clear path).
+   */
+  let spillAutoLoadInFlight = false;
+  let spillAutoLoaded = false;
+
+  /**
+   * When the user scrolls near the top of the in-memory range AND there
+   * are entries waiting on disk, load the spill into memory and prepend
+   * it to the model. After load, the user's vertical position stays
+   * anchored on the line they were looking at (so the load isn't a jarring
+   * scroll jump). One-shot per session — the disk content stops being a
+   * source of truth once it's been hoisted into memory.
+   */
+  async function maybeAutoLoadSpill(): Promise<void> {
+    if (spillAutoLoaded || spillAutoLoadInFlight) return;
+    if (!spillId || spilledEntryCount === 0) return;
+    // Trigger when the user is within ~200 px of the top of the in-memory
+    // range. 200 px ≈ 10 unwrapped log lines — far enough to give the load
+    // time to complete before they actually reach row 0; close enough that
+    // we don't load on every minor scroll-up. The in-memory cap is 50K so
+    // there's plenty of buffer above this trigger.
+    if (outputEl.scrollTop > 200) return;
+
+    spillAutoLoadInFlight = true;
+    try {
+      const res = (await window.roku.consoleSpillRead(spillId)) as {
+        success: boolean;
+        entries?: string[];
+        error?: string;
+      };
+      if (!res?.success || !Array.isArray(res.entries) || res.entries.length === 0) {
+        if (!res?.success) rendererWarn('[Console spill] auto-load read failed:', res?.error);
+        return;
+      }
+      // Decode NDJSON back to TelnetLogEntry. Same shape `loadAllEntriesIncludingSpill`
+      // uses for export, but inlined here so we can prepend in one pass
+      // without holding a temporary array of all in-memory entries too.
+      const spilled: TelnetLogEntry[] = [];
+      for (const line of res.entries) {
+        try {
+          const obj = JSON.parse(line) as { t?: string; ty?: string; st?: StructuredConsolePayload[] };
+          if (typeof obj?.t !== 'string' || typeof obj?.ty !== 'string') continue;
+          spilled.push({
+            text: obj.t,
+            timestamp: null,
+            type: obj.ty,
+            hasIssue: lineHasBrsIssue(obj.t),
+            ...(obj.st ? { structuredTargets: obj.st } : {})
+          });
+        } catch {
+          /* skip corrupt line */
+        }
+      }
+      if (spilled.length === 0) return;
+      recognizedIssueCount += countIssues(spilled);
+
+      // Mutate the entries array in place (same reference the surface
+      // observes) — `splice(0, 0, ...spilled)` prepends without losing the
+      // identity. Then the surface relayouts.
+      const beforeST = outputEl.scrollTop;
+      logLines.splice(0, 0, ...spilled);
+      const addedPx = surface.notifyPrepended(spilled.length);
+      // Anchor the user's view on the same logical line they were looking
+      // at: we just shoved `addedPx` of new content above their current
+      // position, so push scrollTop down by the same amount.
+      outputEl.scrollTop = beforeST + addedPx;
+
+      // The disk content is now in memory. Drop the spill counter and let
+      // the disk file age out at its own cap — future trims will write
+      // *new* content past the loaded prefix, but the auto-load won't
+      // re-fire (one-shot guard above).
+      spilledEntryCount = 0;
+      refreshLineCount();
+      spillAutoLoaded = true;
+    } catch (e) {
+      rendererWarn('[Console spill] auto-load rejected:', e);
+    } finally {
+      spillAutoLoadInFlight = false;
+    }
+  }
+
+  function handleScroll() {
+    if (isScrolling) {
+      lastScrollTop = outputEl.scrollTop;
+      return;
+    }
+
+    const newScrollTop = outputEl.scrollTop;
+    const delta = newScrollTop - lastScrollTop;
+
+    // Pin state follows *user intent*, not instantaneous distance-from-bottom.
+    // Programmatic tail-scroll and virtualizer remeasure often fire scroll
+    // events before the view lands within SCROLL_TAIL_THRESHOLD_PX — treating
+    // those as "user left the tail" left pinnedToBottom false while the ↓
+    // button was still shown.
+    if (delta < -5) {
+      pinnedToBottom = false;
+      updateScrollToBottomAffordance();
+    } else if (!pinnedToBottom && isNearBottom()) {
+      // Re-pin on proximity alone, not "this single event moved >5px" — a slow/gentle scroll
+      // (trackpad, gradual wheel) reaches the bottom via many small deltas that individually
+      // never clear a >5px gate, which left the ↓ button stuck visible even once the user was
+      // genuinely sitting at the tail. The `delta < -5` branch above already takes priority for
+      // a decisive move away, so proximity here can't fight a real "leaving the tail" signal.
+      pinnedToBottom = true;
+      updateScrollToBottomAffordance();
+    }
+
+    lastScrollTop = newScrollTop;
+
+    // Auto-load the disk spill when the user scrolls near the top of the
+    // in-memory range. Async + one-shot — see `maybeAutoLoadSpill` doc.
+    void maybeAutoLoadSpill();
+  }
+
+  // Click delegation for URL spans and structured-payload viewers is wired
+  // inside `mountConsoleLogFileView` (called by `mountConsoleLogSurface`),
+  // so we don't attach a duplicate handler here. The surface's handler uses
+  // identical logic — `firstHitElementOnConsoleClick` → URL span check →
+  // structured-target lookup via `clickedStructuredTargetIndex` (deepest
+  // nested JSON+ literal under the click), falling back to the primary target.
+
+  // In-flight guard. Multiple concurrent callers (e.g. an Action Script
+  // auto-connect colliding with a manual click, or the executor pre-run
+  // hook firing simultaneously with the checkbox-change handler) used to
+  // each issue their own `api.telnetConnect()` IPC. With the main-process
+  // handler now idempotent that is no longer destructive, but we still
+  // dedupe here to avoid stacked `--- Connected ---` placeholder lines and
+  // redundant `updateConnectionState` work, and to give every caller the
+  // same resolved promise.
+  let connectInFlight: Promise<void> | null = null;
+  /** When this panel's current Connect succeeded — the window in which incoming lines are Roku's replay. */
+  let connectedAt = -Infinity;
+  /** Printed at most once per console session / debug session (see noteDebuggerOwnsOutput). */
+  let routedNoticeShown = false;
+  function noteDebuggerOwnsOutput(): void {
+    if (routedNoticeShown || !isConnected) return;
+    routedNoticeShown = true;
+    void addLogLine(S.telnet.lineDebuggerOutputRouted, false);
+  }
+
+  /** Shared click-handler + programmatic-entry path so the button and the
+   *  exposed `panel.connectTelnet()` go through identical logic. */
+  async function connectTelnet(options?: { skipRelayBuffer?: boolean }): Promise<void> {
+    if (isConnected) return;
+    if (connectInFlight) return connectInFlight;
+
+    const promise = (async () => {
+      updateConnectionState(false, true);
+
+      try {
+        const result = await api.telnetConnect(options);
+
+        if (result.success) {
+          telnetTcpState.value = '';
+          pendingTelnetLines.length = 0;
+          cancelTelnetFlush();
+          clearDeferredTelnetHeavyLines();
+          // Fresh parser state per connection, off the main thread — torn down in the disconnect
+          // handler below. Defensive destroy first: a prior worker should already be gone by the
+          // time a new Connect succeeds, but a stray one must not be leaked.
+          telnetParseWorker?.destroy();
+          telnetParseWorker = createWorkerPool<string[], TelnetParseResult>({
+            workerUrl: new URL('./telnet-parse.worker.js', import.meta.url),
+            poolSize: 1
+          });
+          // Start every Connect with a clean view. Previously the in-memory
+          // scrollback survived a disconnect → reconnect (or a brief drop),
+          // so reconnecting showed a stale mix of the old session's lines plus
+          // whatever Roku streamed next. The console should only show what the
+          // device emits from this connection onward. Clear in place — the
+          // surface holds the same `logLines` array reference (see
+          // `clearConsoleLocal`), so reassigning would orphan the virtualizer.
+          logLines.length = 0;
+          recognizedIssueCount = 0;
+          // Drop any filter-mode size-cache pins from the previous session before
+          // resetting the count — `onLinesCleared()` below only re-arms the filter
+          // when a query is still typed in the box, so a fresh reconnect with an
+          // empty find input would otherwise leave stale pinned indices behind
+          // (wrongly hiding whichever fresh lines land on those same indices).
+          virt.applyRowFilter(null);
+          virt.setCount(0);
+          // Keep any active query armed against the fresh session (see clearConsoleLocal).
+          findBarHandle?.onLinesCleared();
+          // Discard the previous session's disk spill before opening the fresh
+          // one below, otherwise its old trimmed history could be auto-loaded
+          // back into the clean view on scroll-up.
+          if (spillId) {
+            const stale = spillId;
+            spillId = null;
+            void window.roku.consoleSpillClear(stale).catch(() => {
+              /* best effort */
+            });
+          }
+          // Open a fresh disk-spill session for this Connect. Tag with the
+          // device IP so co-existing tab spills are distinguishable in the
+          // temp dir (purely a debugging convenience). Fire-and-forget; if
+          // the IPC fails the spill stays disabled for this session and the
+          // counter falls back to "buffered only".
+          spillCapHit = false;
+          spilledEntryCount = 0;
+          spillAutoLoaded = false;
+          spillAutoLoadInFlight = false;
+          window.roku
+            .consoleSpillStart(api.ip)
+            .then((res: { success: boolean; spillId?: string; error?: string }) => {
+              if (res?.success && res.spillId) {
+                spillId = res.spillId;
+              } else {
+                rendererWarn('[Console spill] start failed:', res?.error);
+              }
+            })
+            .catch((err: unknown) => {
+              rendererWarn('[Console spill] start rejected:', err);
+            });
+          updateConnectionState(true);
+          connectedAt = performance.now();
+          routedNoticeShown = false;
+          const relayNote = api.isRemote
+            ? options?.skipRelayBuffer
+              ? S.telnet.relayNoteSkipBuffer
+              : S.telnet.relayNoteReplayBuffer
+            : '';
+          addLogLine(S.telnet.lineConnectedTo(api.ip, relayNote), false);
+        } else {
+          updateConnectionState(false, false, result.error || S.telnet.connectionFailed);
+          addLogLine(S.telnet.lineConnectionFailed(result.error || S.telnet.unknownError), false);
+        }
+      } catch (error) {
+        const msg = errMessage(error);
+        updateConnectionState(false, false, msg);
+        addLogLine(S.telnet.lineConnectionError(msg), false);
+      }
+    })();
+    connectInFlight = promise.finally(() => {
+      connectInFlight = null;
+    });
+    return connectInFlight;
+  }
+
+  connectBtn.addEventListener('click', () => {
+    void connectTelnet();
+  });
+
+
+  /** Shared exit path so the Disconnect button and the exposed
+   *  `panel.disconnectTelnet()` go through identical logic. Idempotent. */
+  async function disconnectTelnet(): Promise<void> {
+    if (!isConnected) return;
+    try {
+      await api.telnetDisconnect();
+      updateConnectionState(false);
+      addLogLine(S.telnet.lineDisconnected, false);
+    } catch (error) {
+      rendererError('Telnet disconnect error:', error);
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  disconnectBtn.addEventListener('click', () => {
+    void disconnectTelnet();
+  });
+  
+  /**
+   * Read the disk spill (if any), parse the NDJSON back into
+   * `TelnetLogEntry`s, and prepend to the in-memory entries — producing
+   * the *full* session history this device tab has seen, regardless of
+   * whether older lines were trimmed past the 50K in-memory cap. Returns
+   * the in-memory list verbatim when no spill exists (the common case).
+   *
+   * Used by Copy / Save / Cmd+A. Async because the spill read is an IPC
+   * call; the worst case (100 MB file) lands in well under a second.
+   *
+   * Spilled entries lose their wall-clock timestamps (the spill format only
+   * carries `text`/`type`/`structuredTargets` — timestamps are a viewer
+   * affordance, never serialised). That's fine: Copy/Save don't include
+   * per-line timestamps in their body either, only in the header block.
+   */
+  async function loadAllEntriesIncludingSpill(): Promise<TelnetLogEntry[]> {
+    if (!spillId || spilledEntryCount === 0) return logLines;
+    try {
+      const res = (await window.roku.consoleSpillRead(spillId)) as {
+        success: boolean;
+        entries?: string[];
+        error?: string;
+      };
+      if (!res?.success || !Array.isArray(res.entries) || res.entries.length === 0) {
+        if (!res?.success) rendererWarn('[Console spill] read failed:', res?.error);
+        return logLines;
+      }
+      const spilled: TelnetLogEntry[] = [];
+      for (const line of res.entries) {
+        try {
+          const obj = JSON.parse(line) as { t?: string; ty?: string; st?: StructuredConsolePayload[] };
+          if (typeof obj?.t !== 'string' || typeof obj?.ty !== 'string') continue;
+          spilled.push({
+            text: obj.t,
+            timestamp: null,
+            type: obj.ty,
+            ...(obj.st ? { structuredTargets: obj.st } : {})
+          });
+        } catch {
+          // Tolerate a corrupt line (rare — would mean a write was
+          // truncated mid-line). Skip and continue.
+        }
+      }
+      return [...spilled, ...logLines];
+    } catch (e) {
+      rendererWarn('[Console spill] read rejected:', e);
+      return logLines;
+    }
+  }
+
+  /**
+   * Settle pending IPC batches and pull in any disk-spilled history so the
+   * caller sees the complete "everything this device tab has logged"
+   * sequence. Both `getVisibleLogLines` and `getVisibleLogsBody` are built
+   * on this — keeping the flush+load step in one place means a future
+   * change (e.g. an extra await on a metadata fetch) lands once instead of
+   * drifting between Copy and Save body paths.
+   */
+  async function loadAllEntriesForExport(): Promise<TelnetLogEntry[]> {
+    await flushTelnetPendingLines();
+    return loadAllEntriesIncludingSpill();
+  }
+
+  /**
+   * Source of truth for "what the user sees and would expect to take with
+   * them" — drives Copy / Save / Cmd+A. Delegates to `selectVisibleLogEntries`
+   * (shared with the Log Viewer) to apply the *filter*-mode query.
+   */
+  async function getVisibleLogLines(): Promise<typeof logLines> {
+    const allEntries = await loadAllEntriesForExport();
+    return selectVisibleLogEntries(allEntries, findBarHandle) as typeof logLines;
+  }
+
+  async function getVisibleLogsBody(): Promise<string> {
+    const allEntries = await loadAllEntriesForExport();
+    return buildVisibleLogText(allEntries, findBarHandle);
+  }
+
+  // Optional chrome — same `if (saveBtn) { … }` shape used for the Save
+  // button below. A reused panel fragment without a `.telnet-copy-btn`
+  // element silently no-ops the Copy affordance instead of throwing.
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      // Async because spill read is an IPC call. The visual feedback
+      // ("Copied!") is set *after* the await so the user doesn't see
+      // success for a copy that's still loading from disk; the spinner
+      // path is reserved for the (unusual) case where the spill read
+      // dominates wall-clock time.
+      const visibleLogs = await getVisibleLogsBody();
+      void window.roku.copyToClipboard(visibleLogs);
+
+      // Visual feedback
+      const originalText = copyBtn.innerHTML;
+      setSafeHTML(copyBtn, '<span class="icon icon-xs"><svg><use href="#icon-check"/></svg></span> ' + S.telnet.copied);
+      setTimeout(() => {
+        setSafeHTML(copyBtn, originalText);
+      }, 2000);
+    });
+  }
+
+  // Save = Copy body + a header block (device + timestamp + line count) +
+  // write-to-file via the system save dialog. The body itself comes through
+  // the same `getVisibleLogLines` helper as Copy so the two stay byte-for-
+  // byte identical and a future filter rule only has to land in one place.
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      // Store original button text at the start
+      const originalText = saveBtn.innerHTML;
+
+      try {
+        const logsToSave = await getVisibleLogLines();
+
+        if (logsToSave.length === 0) {
+          // Show feedback that there's nothing to save
+          setSafeHTML(saveBtn, icon('x', 'icon-xs') + ' ' + S.telnet.saveNoLogs);
+          setTimeout(() => {
+            setSafeHTML(saveBtn, originalText);
+          }, 2000);
+          return;
+        }
+
+        const formattedLogs = logsToSave.map((log) => log.text).join('\n');
+        
+        // Add header with device info and timestamp
+        const header = [
+          '='.repeat(80),
+          S.telnet.saveHeaderTitle,
+          S.telnet.saveHeaderDevice(device.deviceName || device.modelName || S.telnet.saveHeaderUnknownDevice, device.ip),
+          S.telnet.saveHeaderSaved(new Date().toLocaleString()),
+          S.telnet.saveHeaderTotalLines(logsToSave.length),
+          '='.repeat(80),
+          ''
+        ].join('\n');
+        
+        const content = header + formattedLogs;
+        
+        // Disable button during save
+        saveBtn.disabled = true;
+        setSafeHTML(saveBtn, icon('refresh', 'icon-xs') + ' ' + S.telnet.saving);
+        
+        // Save to file
+        const result = await window.roku.saveTextFile({
+          content,
+          defaultName: `roku-console-logs-${Date.now()}.txt`,
+          dialogTitle: S.telnet.saveDialogTitle
+        });
+        
+        if (result.success) {
+          setSafeHTML(saveBtn, icon('check', 'icon-xs') + ' ' + S.telnet.saved);
+          setTimeout(() => {
+            setSafeHTML(saveBtn, originalText);
+            saveBtn.disabled = false;
+          }, 2000);
+        } else {
+          setSafeHTML(saveBtn, icon('x', 'icon-xs') + ' ' + S.telnet.saveError);
+          setTimeout(() => {
+            setSafeHTML(saveBtn, originalText);
+            saveBtn.disabled = false;
+          }, 2000);
+          rendererError('Failed to save console logs:', result.error);
+        }
+      } catch (error) {
+        rendererError('Error saving console logs:', error);
+        setSafeHTML(saveBtn, icon('x', 'icon-xs') + ' ' + S.telnet.saveError);
+        saveBtn.disabled = false;
+        setTimeout(() => {
+          setSafeHTML(saveBtn, originalText);
+        }, 2000);
+      }
+    });
+  }
+  
+  if (scrollToBottomBtn) {
+    scrollToBottomBtn.addEventListener('click', () => {
+      scrollToLatestLogs();
+    });
+  }
+
+  // Wheel up is an explicit "leave the tail" gesture; don't infer that from
+  // distance-from-bottom after programmatic scroll/layout churn.
+  outputEl.addEventListener(
+    'wheel',
+    (e) => {
+      if (isScrolling) return;
+      if (e.deltaY < 0) {
+        pinnedToBottom = false;
+        updateScrollToBottomAffordance();
+      }
+    },
+    { passive: true }
+  );
+
+  outputEl.addEventListener('scroll', handleScroll, { passive: true });
+
+  // Pause auto-scroll / trim / unmounting / the heavy-line drain while the user is selecting
+  // text in the console (see `userSelecting`). selectionchange covers mouse drag, shift-click,
+  // and keyboard selection alike; mousedown/mouseup cover the drag itself even through a frame
+  // where selectionchange's live computation is momentarily unreliable (see `mouseDownInOutput`).
+  document.addEventListener('selectionchange', onSelectionChange);
+  outputEl.addEventListener('mousedown', onOutputMouseDown);
+  window.addEventListener('mouseup', onWindowMouseUp, { capture: true });
+
+  // Centered, drag-to-resize find bar — shared helper (its ResizeObserver on the
+  // header re-clamps the width whenever the header resizes, e.g. the sidebar is
+  // toggled, so an expanded box shrinks back rather than overlapping the controls).
+  const findSlotEl = panel.querySelector('.telnet-find-slot');
+  const findResizeEl = panel.querySelector('.telnet-find-resize');
+  const findHeaderEl = panel.querySelector('.telnet-header');
+  const disposeFindResize =
+    findSlotEl instanceof HTMLElement &&
+    findResizeEl instanceof HTMLElement &&
+    findHeaderEl instanceof HTMLElement
+      ? attachHeaderSearchResize({
+          slot: findSlotEl,
+          handle: findResizeEl,
+          header: findHeaderEl,
+          leftGroup: panel.querySelector('.telnet-actions'),
+          rightGroup: panel.querySelector('.telnet-header .card-header-actions'),
+          storageKey: searchWidthKey('telnet', api.ip || 'unknown'),
+          minWidthPx: 420
+        })
+      : null;
+
+  outputEl.querySelector('.telnet-scroll-spacer')?.remove();
+
+  function clearConsoleLocal(): void {
+    telnetTcpState.value = '';
+    pendingTelnetLines.length = 0;
+    telnetParserState.pendingLogPrefix = '';
+    cancelTelnetFlush();
+    clearDeferredTelnetHeavyLines();
+    // Clear in place — `mountConsoleLogSurface` holds the same array
+    // reference as `entries`. Reassigning (`logLines = []`) would leave the
+    // virtualizer + find bar observing a stale array while new IPC batches
+    // push into a fresh one: the line counter increments but nothing renders.
+    logLines.length = 0;
+    recognizedIssueCount = 0;
+    // Drive the row teardown THROUGH the virtualizer rather than blowing
+    // away `outputEl.innerHTML`. The virtualizer's container element
+    // (`virtualContainerEl`, appended to outputEl during setup) IS a child
+    // of outputEl; `innerHTML = ''` would detach it, leaving the
+    // virtualizer pointing at a DOM node no longer in the tree.
+    // Subsequent `addLogLinesBatch` → `virt.setCount(...)` calls would
+    // then mount rows into the orphaned container and the user would see
+    // nothing — exactly the "logs aren't streaming after Clear" symptom.
+    // setCount(0) walks the mounted map and runs `onUnmount` per row, then
+    // recomputes layout against the now-empty model. Drop any filter-mode
+    // size-cache pins first — see the identical reset in `connectTelnet`.
+    virt.applyRowFilter(null);
+    virt.setCount(0);
+    // Not resetFindState(): keep the query active and re-arm its scan against the cleared buffer, so the
+    // find count auto-repopulates as new matching lines stream in (it doesn't die until retyped).
+    findBarHandle?.onLinesCleared();
+    // Wipe the disk spill too — the user explicitly asked for a clean
+    // slate; keeping spilled history would be misleading. Then drop the
+    // spillId so subsequent trims don't try to write to a deleted file.
+    if (spillId) {
+      const closing = spillId;
+      spillId = null;
+      void window.roku.consoleSpillClear(closing).catch(() => {
+        /* best effort */
+      });
+    }
+    spilledEntryCount = 0;
+    spillCapHit = false;
+    spillAutoLoaded = false;
+    spillAutoLoadInFlight = false;
+    // Open a fresh spill if we're still connected — Clear during an active
+    // session should resume capturing future trims to disk.
+    if (isConnected) {
+      window.roku.consoleSpillStart(api.ip).then(
+        (res: { success: boolean; spillId?: string }) => {
+          if (res?.success && res.spillId) spillId = res.spillId;
+        },
+        () => {
+          /* best effort */
+        }
+      );
+    }
+    refreshLineCount();
+
+    // Reset scroll-tail tracking so the next batch of incoming lines
+    // pins to the bottom (consistent with a fresh-clear UX).
+    pinnedToBottom = true;
+    lastScrollTop = 0;
+    outputEl.scrollTop = 0;
+    updateScrollToBottomAffordance();
+
+    // Re-add the placeholder when disconnected, but APPEND it next to
+    // virtualContainerEl rather than replacing outputEl's contents — same
+    // shape as the cold-start markup in index.html, where the placeholder
+    // and the virtualizer container are siblings inside .telnet-output.
+    if (!isConnected) {
+      const existingPlaceholder = outputEl.querySelector('.telnet-placeholder');
+      if (!existingPlaceholder) {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'telnet-placeholder';
+        setSafeHTML(placeholder, `
+          <span class="icon icon-lg"><svg><use href="#icon-terminal"/></svg></span>
+          <p>${S.telnet.placeholderTitle}</p>
+          <p class="telnet-hint">${S.telnet.placeholderHintDevMode}<br>${S.telnet.placeholderHintSingleConn}</p>
+        `);
+        // Reinsert the placeholder before the virtualizer's spacer
+        // container so the cold-start sibling order (placeholder → container)
+        // is preserved. The surface owns the container; `getContainerEl()`
+        // exposes it without a fragile `outputEl.querySelector(...)` lookup.
+        outputEl.insertBefore(placeholder, surface.view.getContainerEl());
+      }
+    }
+  }
+
+  // Clear console (local scrollback only)
+  clearBtn.addEventListener('click', () => {
+    clearConsoleLocal();
+  });
+
+  // Console analytics dashboard — opens a read-only breakdown of the in-memory buffer. Pass a shallow
+  // copy so streaming can keep mutating logLines underneath the open modal.
+  let analyticsHandle: ConsoleAnalyticsHandle | null = null;
+  let analyticsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // The Console computes findings in-renderer from the live buffer (cheap; the buffer is resident).
+  // The modal itself is content-only — it renders whatever findings/timeSpan we hand it — so the
+  // windowed Log Viewer can feed it findings scanned in the main process instead.
+  const analyticsSnapshot = (): ConsoleAnalyticsSnapshot => {
+    let first: string | null = null;
+    let last: string | null = null;
+    for (const e of logLines) {
+      if (e.timestamp) {
+        if (first === null) first = e.timestamp;
+        last = e.timestamp;
+      }
+    }
+    const texts = logLines.map((e) => e.text);
+    return {
+      // Crashes need the whole ordered buffer (multi-line Micro Debugger dumps), not just issue lines.
+      findings: computeConsoleFindings(logLines, detectBrsCrashes(texts), detectBeaconTimings(texts)),
+      scannedLines: logLines.length,
+      timeSpan: { first, last },
+      meta: {
+        bufferedCount: logLines.length,
+        totalCount: spilledEntryCount + logLines.length
+      }
+    };
+  };
+
+  // Jump from a Monitor occurrence to its line in the live buffer. `index` is the buffer array index
+  // (== the virtualizer row index; see `computeConsoleFindings`). Unpin stick-to-bottom first, exactly
+  // as find navigation does, so a streaming tail doesn't fight the scroll.
+  const revealBufferLine = (index: number): void => {
+    if (index < 0 || index >= logLines.length) return;
+    if (pinnedToBottom) {
+      pinnedToBottom = false;
+      updateScrollToBottomAffordance();
+    }
+    revealAndFlashLine(virt, index);
+  };
+
+  dashboardBtn?.addEventListener('click', () => {
+    if (recognizedIssueCount === 0) return;
+    analyticsHandle?.close();
+    analyticsHandle = openConsoleAnalyticsModal(
+      analyticsSnapshot,
+      () => {
+        analyticsHandle = null;
+        clearTimeout(analyticsRefreshTimer);
+      },
+      revealBufferLine,
+      dashboardBtn
+    );
+  });
+
+  // While the monitor is open, re-render it (debounced) on every new batch of lines. Deliberately NOT
+  // gated on "did recognizedIssueCount change" — that counter only reflects single-line BrightScript
+  // catalog matches (see lineHasBrsIssue above), so a batch containing only a performance beacon
+  // (Video Start, Channel Exit, …) or only a crash dump would leave it unchanged, and the modal would
+  // silently miss that update until manually reopened (which pulls a fresh snapshot unconditionally).
+  // The 400ms debounce below already bounds the cost of recomputing findings while the modal is open.
+  function scheduleAnalyticsRefresh(): void {
+    if (!analyticsHandle) return;
+    clearTimeout(analyticsRefreshTimer);
+    analyticsRefreshTimer = setTimeout(() => {
+      analyticsHandle?.refresh();
+    }, 400);
+  }
+
+  const splitMenuCleanups: Array<() => void> = [];
+  const registerSplitMenuCleanup = (fn: () => void) => {
+    splitMenuCleanups.push(fn);
+  };
+
+  // Relay Connect: default replays the server gap buffer; menu offers live-only.
+  const connectMenuBtn = panel.querySelector<HTMLButtonElement>('.telnet-connect-menu-btn');
+  const connectMenu = panel.querySelector<HTMLElement>('.telnet-connect-menu');
+  const connectLiveOnlyItem = panel.querySelector<HTMLButtonElement>(
+    '.telnet-connect-menu-item[data-connect-action="live-only"]'
+  );
+
+  if (isRelayConsole && connectSplit && connectMenuBtn && connectMenu && connectLiveOnlyItem) {
+    const connectMenuUi = wireTelnetSplitMenu(connectSplit, connectMenuBtn, connectMenu, registerSplitMenuCleanup);
+    connectLiveOnlyItem.addEventListener('click', () => {
+      connectMenuUi.close();
+      void connectTelnet({ skipRelayBuffer: true });
+    });
+  }
+
+  // Relay Clear: main button = local only; menu = relay-only or local + relay.
+  const clearMenuBtn = panel.querySelector<HTMLButtonElement>('.telnet-clear-menu-btn');
+  const clearMenu = panel.querySelector<HTMLElement>('.telnet-clear-menu');
+  const clearRelayOnlyItem = panel.querySelector<HTMLButtonElement>(
+    '.telnet-clear-menu-item[data-clear-action="relay-buffer"]'
+  );
+  const clearLocalAndRelayItem = panel.querySelector<HTMLButtonElement>(
+    '.telnet-clear-menu-item[data-clear-action="local-and-relay"]'
+  );
+
+  function clearRelayBufferOnServer(): void {
+    void api.telnetClearRelayBuffer!().then((res) => {
+      if (res?.success === false) {
+        rendererWarn('[Console] relay buffer clear failed:', res?.error);
+      }
+    }).catch((err: unknown) => {
+      rendererWarn('[Console] relay buffer clear rejected:', err);
+    });
+  }
+
+  const clearSplit = panel.querySelector<HTMLElement>('.telnet-clear-split');
+  if (isRelayConsole && clearSplit && clearMenuBtn && clearMenu && clearRelayOnlyItem && clearLocalAndRelayItem) {
+    const clearMenuUi = wireTelnetSplitMenu(clearSplit, clearMenuBtn, clearMenu, registerSplitMenuCleanup);
+    clearRelayOnlyItem.addEventListener('click', () => {
+      clearMenuUi.close();
+      clearRelayBufferOnServer();
+    });
+    clearLocalAndRelayItem.addEventListener('click', () => {
+      clearMenuUi.close();
+      clearConsoleLocal();
+      clearRelayBufferOnServer();
+    });
+  }
+
+  // Expose full console log to Action Script executor (reads in-memory logLines, not DOM). Async
+  // since the flush now goes through the per-connection worker while connected (see
+  // `getParsedTelnetEntries`) — callers (MCP tool handlers) already await these.
+  panel.getTelnetLogText = async function () {
+    await flushTelnetPendingLines();
+    return logLines.map(log => (log.timestamp ? `[${log.timestamp}] ${log.text}` : log.text)).join('\n');
+  };
+  panel.getTelnetLogSnapshot = async function (afterCursor = 0, maxLines = 500) {
+    await flushTelnetPendingLines();
+    const cap = Math.min(Math.max(1, maxLines), 2000);
+    const start = Math.max(0, Math.min(afterCursor, logLines.length));
+    const slice = logLines.slice(start, start + cap);
+    return {
+      lines: slice.map(l => ({ text: l.text, timestamp: l.timestamp ?? null, type: l.type })),
+      cursor: start + slice.length,
+      totalLines: logLines.length,
+      connected: isConnected
+    };
+  };
+  panel.isTelnetConnected = function () {
+    return isConnected;
+  };
+  panel.getConsoleMonitorFindings = async function () {
+    await flushTelnetPendingLines();
+    const texts = logLines.map((e) => e.text);
+    return {
+      connected: isConnected,
+      scannedLines: logLines.length,
+      totalCaptured: spilledEntryCount + logLines.length,
+      ...computeConsoleFindings(logLines, detectBrsCrashes(texts), detectBeaconTimings(texts))
+    };
+  };
+  panel.connectTelnet = connectTelnet;
+  panel.disconnectTelnet = disconnectTelnet;
+
+  const telnetDeviceRef = {
+    ip: api.ip,
+    isRemote: api.isRemote,
+    serverUrl: api.serverUrl
+  };
+
+  function isOurTelnetEvent(data: unknown): data is DebugTelnetIpcPayload {
+    return debugTelnetIpcTargetsDevice(data as DebugTelnetIpcPayload, telnetDeviceRef);
+  }
+
+  // Listen for telnet events (these come from the main process).
+  // Filter by connectionId so remote tabs at the same private IP (or a local
+  // tab plus a remote tab at the same address) do not cross-deliver chunks.
+  const dataCleanup = window.roku.onTelnetData((data) => {
+    const payload = data as DebugTelnetIpcPayload & { data?: string };
+    if (isOurTelnetEvent(payload) && typeof payload.data === 'string') {
+      ingestTelnetIpcChunk(payload.data);
+    }
+  });
+
+  // When the BrightScript debug protocol (8081) is attached, the Roku routes the
+  // channel's print output to the debugger's I/O channel instead of the 8085
+  // console — so surface that io-output here too, else the console looks dead
+  // while debugging. Buffered into complete lines (chunks aren't line-aligned).
+  let debugOutBuffer = '';
+  const debugOutputCleanup = (window.roku as unknown as {
+    onDebuggerOutput?: (cb: (data: unknown) => void) => () => void;
+  }).onDebuggerOutput?.((data) => {
+    const d = (data ?? {}) as { ip?: string; text?: string; isRemote?: boolean; serverUrl?: string };
+    if (!debugEventTargetsDevice(d, telnetDeviceRef)) return; // RCE tabs are local-origin here
+    if (!d.text) return;
+    debugOutBuffer += d.text;
+    const parts = debugOutBuffer.split(/\r?\n/);
+    debugOutBuffer = parts.pop() ?? '';
+    if (parts.length) addLogLinesBatch(parts, true, false);
+  });
+
+  // Roku does NOT hand a channel's print output back to 8085 when the socket debugger leaves — the
+  // console goes silent for the rest of that channel instance (system beacons still arrive, print
+  // output doesn't). Explain that at the moment it happens: a live session ending while the console
+  // is up. (The replayed-history variant is handled in ingestTelnetIpcChunk.)
+  let debuggerWasLive = false;
+  const debugStateCleanup = (window.roku as unknown as {
+    onDebuggerState?: (cb: (data: unknown) => void) => () => void;
+  }).onDebuggerState?.((data) => {
+    const d = (data ?? {}) as { ip?: string; state?: string; isRemote?: boolean; serverUrl?: string };
+    if (!debugEventTargetsDevice(d, telnetDeviceRef)) return;
+    if (d.state === 'attached' || d.state === 'running' || d.state === 'stopped') {
+      debuggerWasLive = true;
+      routedNoticeShown = false; // a new session may end later — say it again then
+      return;
+    }
+    if (d.state === 'disconnected' && debuggerWasLive) {
+      debuggerWasLive = false;
+      noteDebuggerOwnsOutput();
+    }
+  });
+
+  const disconnectCleanup = window.roku.onTelnetDisconnected(async (data) => {
+    const payload = data as DebugTelnetIpcPayload & {
+      hadError?: boolean;
+      aliveMs?: number;
+      bytesReceived?: number;
+    };
+    if (isOurTelnetEvent(payload)) {
+      const tail = takeTelnetTail(telnetTcpState);
+      if (tail) {
+        pendingTelnetLines.push(tail);
+      }
+      await flushTelnetPendingLines();
+      if (telnetParserState.pendingLogPrefix) {
+        await addLogLine(telnetParserState.pendingLogPrefix);
+        telnetParserState.pendingLogPrefix = '';
+      }
+
+      // Diagnostic detail from main: how long the socket stayed open and
+      // whether any bytes ever arrived. Roku 8085 closing fast with zero
+      // bytes received is the classic "another telnet client holds the
+      // BrightScript log binding" / "channel exited immediately" pattern;
+      // a plain "--- Connection closed ---" hides the actual cause.
+      const aliveMs = typeof payload.aliveMs === 'number' ? payload.aliveMs : -1;
+      const bytes = typeof payload.bytesReceived === 'number' ? payload.bytesReceived : -1;
+      const aliveStr = aliveMs >= 0
+        ? (aliveMs < 1000 ? `${aliveMs}ms` : `${(aliveMs / 1000).toFixed(1)}s`)
+        : null;
+
+      await addLogLine(S.telnet.lineConnectionClosed(aliveStr, bytes), false);
+
+      // Heuristic hint: short-lived socket + zero bytes ⇒ Roku didn't
+      // bind its log stream to us. Most common causes: another telnet
+      // client (BrightScript IDE, VS Code BrightScript extension, an
+      // IDE plugin, a stray `telnet <ip> 8085` in a terminal, another
+      // Dev Studio window pointed at the same IP) holds the binding;
+      // the channel exited or crashed; or 8085 was never reachable
+      // (firewall / Developer Mode off). hadError adds the OS-level
+      // signal that the close was abnormal (RST etc.).
+      if (aliveMs >= 0 && aliveMs < 5000 && bytes <= 0) {
+        await addLogLine(S.telnet.hintNoLogData, false);
+      } else if (payload.hadError) {
+        await addLogLine(S.telnet.hintAbnormalClose, false);
+      }
+
+      // Every line up to and including the close message has been enqueued and awaited above, so
+      // it's safe to tear the worker down now — nothing left in flight for it to drop.
+      telnetParseWorker?.destroy();
+      telnetParseWorker = null;
+
+      updateConnectionState(false, false, payload.hadError ? S.telnet.connectionLost : null);
+      // A bounce (main destroys + re-dials, e.g. Fiddle's post-sideload rebind) can deliver the
+      // replacement's TelnetConnected while the awaits above were still running — at that moment
+      // isConnected was still true, so the adoption listener below skipped it. Re-sync now.
+      adoptIfMainConnected();
+    }
+  });
+
+  /** Adopt a live 8085 socket main already holds for this device (see the onTelnetConnected
+   *  listener below). Optional: the RCE adapter has no status IPC. */
+  function adoptIfMainConnected(): void {
+    void api.telnetStatus?.().then(
+      (status) => {
+        if (status?.connected) void connectTelnet();
+      },
+      () => {
+        /* best-effort */
+      }
+    );
+  }
+  
+  const errorCleanup = window.roku.onTelnetError((data) => {
+    const payload = data as DebugTelnetIpcPayload & { error?: string };
+    if (isOurTelnetEvent(payload)) {
+      addLogLine(S.telnet.lineError(payload.error ?? S.telnet.unknownError), false);
+    }
+  });
+
+  // Main can open (or re-open) this device's 8085 socket on the panel's behalf — the Sideload
+  // Relay fan-out's console step, Fiddle's pre-sideload ensure / post-sideload bounce. Adopt it
+  // through the normal Connect path so the status/buttons reflect the live socket and this panel
+  // takes its own 'main-ui' lease. connectTelnet() no-ops when already connected or in flight, and
+  // the main-side connect reuses a healthy socket, so this can't bounce or double-connect.
+  const connectedCleanup = window.roku.onTelnetConnected((data: unknown) => {
+    if (isOurTelnetEvent(data)) void connectTelnet();
+  });
+  adoptIfMainConnected();
+  
+  // For a remote-managed device the debug session runs on the remote server, not this
+  // machine — subscribe to its live event stream (server-wide, like the Network
+  // Inspector stream) before the sidebar attaches. `panel.id` is the tab's stable id
+  // (same one app.ts uses as the DOM element id), so it doubles as the holder key —
+  // no separate tabId plumbing needed here. Skipped when the server itself doesn't support
+  // the debugger (`capabilities.debugger === false`) — nothing will ever come through it.
+  if (api.isRemote && api.serverUrl && api.debuggerSupported !== false && window.roku?.remoteDebuggerStreamConnect) {
+    void window.roku.remoteDebuggerStreamConnect(api.serverUrl, panel.id);
+  }
+
+  // Store cleanup functions on panel for later removal
+  // BrightScript debugger sidebar (Call Stack / Breakpoints / Variables), shown in
+  // this Console tab while debugging is enabled for the device. Display-only; driven
+  // by debug-protocol events the main process mirrors to the main window.
+  const debugSidebar = setupTelnetDebugSidebar(panel, api.ip, {
+    autoConnectConsole: () => {
+      // Auto-connect the 8085 console when debugging is enabled for this device,
+      // if it's currently disconnected (clicks the standard Connect path).
+      if (statusEl.classList.contains('disconnected')) connectBtn.click();
+    },
+    isRemote: api.isRemote,
+    serverUrl: api.serverUrl,
+    debuggerSupported: api.debuggerSupported
+  });
+
+  // Debug REPL: an input bar that slides up under the console output while the
+  // debugger is stopped. Evaluates BrightScript in the selected frame; `print`
+  // output streams back through the console via the debug io-output.
+  const replEl = panel.querySelector<HTMLElement>('[data-debug-repl]');
+  const replInput = panel.querySelector<HTMLInputElement>('[data-debug-repl-input]');
+  const replOutputContainer = outputEl.parentElement; // .telnet-output-container
+  let disposeRepl: (() => void) | undefined;
+  if (replEl && replInput) {
+    const runRepl = async (): Promise<void> => {
+      const src = replInput.value.trim();
+      if (!src) return;
+      replInput.value = '';
+      addLogLine(`› ${src}`, false); // echo the command (› prompt)
+      try {
+        const res = await debugSidebar.repl.execute(src);
+        for (const e of res.errors) addLogLine(e, false);
+      } catch (e) {
+        addLogLine(errMessage(e), false);
+      }
+    };
+    const onReplKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Enter') void runRepl();
+    };
+    replInput.addEventListener('keydown', onReplKey);
+    const offAvailability = debugSidebar.repl.onAvailabilityChange((stopped) => {
+      replEl.classList.toggle('telnet-debug-repl--open', stopped);
+      replEl.setAttribute('aria-hidden', String(!stopped));
+      replOutputContainer?.classList.toggle('telnet-output-container--repl', stopped);
+      if (!stopped && document.activeElement === replInput) replInput.blur();
+    });
+    disposeRepl = () => {
+      offAvailability();
+      replInput.removeEventListener('keydown', onReplKey);
+      replEl.classList.remove('telnet-debug-repl--open');
+      replOutputContainer?.classList.remove('telnet-output-container--repl');
+    };
+  }
+
+  panel._telnetCleanup = () => {
+    debugSidebar.cleanup();
+    if (api.isRemote && api.serverUrl && window.roku?.remoteDebuggerStreamDisconnect) {
+      void window.roku.remoteDebuggerStreamDisconnect(api.serverUrl, panel.id);
+    }
+    disposeRepl?.();
+    clearTimeout(analyticsRefreshTimer);
+    analyticsHandle?.close();
+    for (const fn of splitMenuCleanups) fn();
+    // Surface dispose tears down: find bar (clears caches + highlight
+    // registry + listeners), document-level keydown shortcut listener,
+    // virtualizer ResizeObservers + scroll observers + all mounted rows.
+    // Without this, repeated panel reuse (device switch) would accumulate
+    // observers on the same scroll element.
+    surface.dispose();
+    disposeFindResize?.dispose();
+    document.removeEventListener('selectionchange', onSelectionChange);
+    outputEl.removeEventListener('mousedown', onOutputMouseDown);
+    window.removeEventListener('mouseup', onWindowMouseUp, { capture: true });
+    document.removeEventListener(CONSOLE_VIEWER_CLOSED_EVENT, onTelnetViewerClosedResume);
+    cancelTelnetFlush();
+    clearDeferredTelnetHeavyLines();
+    dataCleanup();
+    debugOutputCleanup?.();
+    debugStateCleanup?.();
+    disconnectCleanup();
+    errorCleanup();
+    connectedCleanup();
+    // Drop the disk spill for this tab. The renderer-side cleanup is
+    // best-effort (the main process also wipes the temp dir on
+    // `app.on('will-quit')`), but doing it eagerly here avoids leaving
+    // orphan files for users who keep the app open with frequent
+    // device-tab churn.
+    if (spillId) {
+      const closing = spillId;
+      spillId = null;
+      void window.roku.consoleSpillClear(closing).catch(() => {
+        /* best effort */
+      });
+    }
+    // Disconnect if still connected
+    if (isConnected) {
+      api.telnetDisconnect().catch(() => {});
+    }
+    // `disconnectCleanup()` above already unregistered the `onTelnetDisconnected` listener that
+    // would normally tear this down, so a panel destroyed while still connected needs its own
+    // explicit destroy here — otherwise the worker thread leaks past the panel's own lifetime.
+    telnetParseWorker?.destroy();
+    telnetParseWorker = null;
+  };
+}
